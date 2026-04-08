@@ -198,8 +198,14 @@ mod tests {
         assert!(last.contains("outer-b*"), "expected outer-b* in {last:?}");
         assert!(last.contains("inner-b*"), "expected inner-b* in {last:?}");
         // The first items should not be marked focused.
-        assert!(!last.contains("outer-a*"), "did not expect outer-a* in {last:?}");
-        assert!(!last.contains("inner-a*"), "did not expect inner-a* in {last:?}");
+        assert!(
+            !last.contains("outer-a*"),
+            "did not expect outer-a* in {last:?}"
+        );
+        assert!(
+            !last.contains("inner-a*"),
+            "did not expect inner-a* in {last:?}"
+        );
     }
 
     // ----- Regression coverage for review issue #1 (handle_keys hook ordering) -----
@@ -215,10 +221,7 @@ mod tests {
     }
 
     #[component]
-    fn TogglingScope(
-        mut hooks: Hooks,
-        props: &ToggleProps,
-    ) -> impl Into<AnyElement<'static>> {
+    fn TogglingScope(mut hooks: Hooks, props: &ToggleProps) -> impl Into<AnyElement<'static>> {
         let mut system = hooks.use_context_mut::<SystemContext>();
         // Flip after the first key press.
         let mut handle = hooks.use_state(|| props.start_handling);
@@ -343,7 +346,10 @@ mod tests {
         let last = canvases.last().unwrap().to_string();
         assert!(last.contains("c*"), "expected c* in {last:?}");
         assert!(!last.contains("a*"), "did not expect a* in {last:?}");
-        assert!(!last.contains("b*"), "b was deactivated, must not be focused");
+        assert!(
+            !last.contains("b*"),
+            "b was deactivated, must not be focused"
+        );
     }
 
     // ----- Regression coverage for nested scope escape hatch (review issue #4) -----
