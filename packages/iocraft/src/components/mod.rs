@@ -4,6 +4,9 @@ pub use button::*;
 mod context_provider;
 pub use context_provider::*;
 
+mod focus_scope;
+pub use focus_scope::*;
+
 mod fragment;
 pub use fragment::*;
 

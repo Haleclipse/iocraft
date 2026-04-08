@@ -48,6 +48,8 @@ mod use_context;
 pub use use_context::*;
 mod use_effect;
 pub use use_effect::*;
+mod use_focus;
+pub use use_focus::*;
 mod use_future;
 pub use use_future::*;
 mod use_memo;
