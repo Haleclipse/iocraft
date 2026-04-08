@@ -179,10 +179,7 @@ mod tests {
             ])))
             .collect()
             .await;
-        let actual = canvases
-            .iter()
-            .map(|c| c.to_string())
-            .collect::<Vec<_>>();
+        let actual = canvases.iter().map(|c| c.to_string()).collect::<Vec<_>>();
         // Initial canvas: auto_focus put `a` in focus.
         let first = &actual[0];
         assert!(first.contains("a*"), "expected initial a* in {first:?}");

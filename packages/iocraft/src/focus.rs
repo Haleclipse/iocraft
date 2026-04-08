@@ -267,8 +267,7 @@ impl FocusState {
         // Compute the proposed new order in a temporary buffer. We don't commit to
         // `self.entries` yet because we need one more equality check against the
         // *current* order to guarantee no-op stability for the defensive path above.
-        let by_id: HashMap<FocusId, FocusEntry> =
-            self.entries.iter().map(|e| (e.id, *e)).collect();
+        let by_id: HashMap<FocusId, FocusEntry> = self.entries.iter().map(|e| (e.id, *e)).collect();
         let mut proposed: Vec<FocusEntry> = Vec::with_capacity(self.entries.len());
         let mut placed: std::collections::HashSet<FocusId> =
             std::collections::HashSet::with_capacity(seq.len());
