@@ -107,6 +107,7 @@ mod canvas;
 mod component;
 mod context;
 mod element;
+mod focus;
 mod handler;
 mod hook;
 mod multimap;
@@ -123,6 +124,7 @@ mod flattened_exports {
     pub use crate::component::*;
     pub use crate::context::*;
     pub use crate::element::*;
+    pub use crate::focus::*;
     pub use crate::handler::*;
     pub use crate::hook::*;
     pub use crate::props::*;
