@@ -74,6 +74,46 @@ pub struct CanvasTextStyle {
     pub invert: bool,
 }
 
+impl CanvasTextStyle {
+    /// Produce a new style by merging an overlay on top of `self`.
+    /// `None` fields in the overlay leave the original value; `Some` fields override.
+    pub fn with_overlay(&self, o: &StyleOverlay) -> Self {
+        Self {
+            color: o.color.unwrap_or(self.color),
+            weight: o.weight.unwrap_or(self.weight),
+            underline: o.underline.unwrap_or(self.underline),
+            italic: o.italic.unwrap_or(self.italic),
+            invert: o.invert.unwrap_or(self.invert),
+        }
+    }
+}
+
+/// A partial style that can be overlaid on an already-rendered [`CanvasCell`] without
+/// touching the original text or style. Each `None` field means "keep the original value";
+/// `Some(v)` means "override with `v`".
+///
+/// Overlays are the mechanism behind cursor inversion, search highlighting, and selection
+/// rendering. They are applied **after** the component tree has finished drawing, so
+/// components do not need to know whether they are "selected" or "under the cursor".
+///
+/// See `docs/design-post-render-style-overlay.md` for the full design rationale.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StyleOverlay {
+    /// Override the foreground color. `Some(None)` resets to default; `None` keeps original.
+    pub color: Option<Option<Color>>,
+    /// Override the background color. `Some(None)` resets to default; `None` keeps original.
+    pub background_color: Option<Option<Color>>,
+    /// Override the text weight.
+    pub weight: Option<Weight>,
+    /// Force underline on or off.
+    pub underline: Option<bool>,
+    /// Force italic on or off.
+    pub italic: Option<bool>,
+    /// Force color inversion on or off. This is the primary field for cursor / search / selection.
+    pub invert: Option<bool>,
+}
+
 /// A single cell on a [`Canvas`], containing optional text and background color.
 #[non_exhaustive]
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -111,6 +151,7 @@ impl CanvasCell {
 pub struct Canvas {
     width: usize,
     cells: Vec<Vec<CanvasCell>>,
+    overlays: Vec<Vec<Option<StyleOverlay>>>,
 }
 
 impl Canvas {
@@ -119,6 +160,7 @@ impl Canvas {
         Self {
             width,
             cells: vec![vec![CanvasCell::default(); width]; height],
+            overlays: vec![vec![None; width]; height],
         }
     }
 
@@ -227,6 +269,76 @@ impl Canvas {
         }
     }
 
+    /// Sets a style overlay on a single cell, without altering the cell's original text or style.
+    pub fn set_overlay(&mut self, x: usize, y: usize, overlay: StyleOverlay) {
+        if let Some(row) = self.overlays.get_mut(y) {
+            if let Some(slot) = row.get_mut(x) {
+                *slot = Some(overlay);
+            }
+        }
+    }
+
+    /// Sets a style overlay on every cell in a rectangular region.
+    pub fn set_overlay_rect(
+        &mut self,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        overlay: StyleOverlay,
+    ) {
+        for row_idx in y..y + h {
+            if let Some(row) = self.overlays.get_mut(row_idx) {
+                for col_idx in x..x + w {
+                    if let Some(slot) = row.get_mut(col_idx) {
+                        *slot = Some(overlay);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Clears the overlay on a single cell.
+    pub fn clear_overlay(&mut self, x: usize, y: usize) {
+        if let Some(row) = self.overlays.get_mut(y) {
+            if let Some(slot) = row.get_mut(x) {
+                *slot = None;
+            }
+        }
+    }
+
+    /// Clears all overlays on the canvas.
+    pub fn clear_overlays(&mut self) {
+        for row in &mut self.overlays {
+            row.fill(None);
+        }
+    }
+
+    /// Returns the text style of a cell with its overlay merged in, if the cell exists.
+    pub fn resolved_text_style(&self, x: usize, y: usize) -> Option<CanvasTextStyle> {
+        let base = self
+            .cells
+            .get(y)
+            .and_then(|r| r.get(x))
+            .and_then(|c| c.text_style())
+            .copied()
+            .unwrap_or_default();
+        match self
+            .overlays
+            .get(y)
+            .and_then(|r| r.get(x))
+            .and_then(|o| o.as_ref())
+        {
+            Some(ov) => Some(base.with_overlay(ov)),
+            None => self
+                .cells
+                .get(y)
+                .and_then(|r| r.get(x))
+                .and_then(|c| c.text_style())
+                .copied(),
+        }
+    }
+
     /// Gets a subview of the canvas for writing.
     pub fn subview_mut(
         &mut self,
@@ -263,30 +375,49 @@ impl Canvas {
 
         for y in 0..self.cells.len() {
             let row = &self.cells[y];
-            let last_non_empty = row.iter().rposition(|cell| !cell.is_empty());
+            let overlay_row = &self.overlays[y];
+            // A cell counts as "non-empty" if it has content, a background, OR an overlay.
+            let last_non_empty = row.iter().enumerate().rposition(|(x, cell)| {
+                !cell.is_empty() || overlay_row.get(x).is_some_and(|o| o.is_some())
+            });
             let row = &row[..last_non_empty.map_or(0, |i| i + 1)];
             let mut col = 0;
             let mut did_clear_line = false;
             while col < row.len() {
                 let cell = &row[col];
+                let overlay = overlay_row.get(col).and_then(|o| o.as_ref());
 
-                if ansi {
+                // Compute the effective text style: base character style merged with overlay.
+                // For empty cells with an overlay, start from default and merge the overlay
+                // so that e.g. a cursor overlay on an empty cell still emits SGR 7.
+                let (effective_style, has_style) = match (&cell.character, overlay) {
+                    (Some(c), Some(ov)) => (c.style.with_overlay(ov), true),
+                    (Some(c), None) => (c.style, true),
+                    (None, Some(ov)) => (CanvasTextStyle::default().with_overlay(ov), true),
+                    (None, None) => (CanvasTextStyle::default(), false),
+                };
+
+                // Effective background: overlay can override the cell's background.
+                let effective_bg = match overlay.and_then(|ov| ov.background_color) {
+                    Some(bg) => bg,
+                    None => cell.background_color,
+                };
+
+                if ansi && has_style {
                     // For certain changes, we need to reset all attributes.
                     let mut needs_reset = false;
-                    if let Some(c) = &cell.character {
-                        if c.style.weight != text_style.weight && c.style.weight == Weight::Normal {
-                            needs_reset = true;
-                        }
-                        if !c.style.underline && text_style.underline {
-                            needs_reset = true;
-                        }
-                        if !c.style.italic && text_style.italic {
-                            needs_reset = true;
-                        }
-                        if !c.style.invert && text_style.invert {
-                            needs_reset = true;
-                        }
-                    } else if text_style.underline || text_style.invert {
+                    if effective_style.weight != text_style.weight
+                        && effective_style.weight == Weight::Normal
+                    {
+                        needs_reset = true;
+                    }
+                    if !effective_style.underline && text_style.underline {
+                        needs_reset = true;
+                    }
+                    if !effective_style.italic && text_style.italic {
+                        needs_reset = true;
+                    }
+                    if !effective_style.invert && text_style.invert {
                         needs_reset = true;
                     }
                     if needs_reset {
@@ -295,36 +426,41 @@ impl Canvas {
                         text_style = CanvasTextStyle::default();
                     }
 
-                    if let Some(c) = &cell.character {
-                        if c.style.color != text_style.color {
-                            write!(
-                                w,
-                                csi!("{}m"),
-                                Colored::ForegroundColor(c.style.color.unwrap_or(Color::Reset))
-                            )?;
-                        }
+                    if effective_style.color != text_style.color {
+                        write!(
+                            w,
+                            csi!("{}m"),
+                            Colored::ForegroundColor(effective_style.color.unwrap_or(Color::Reset))
+                        )?;
+                    }
 
-                        if c.style.weight != text_style.weight {
-                            match c.style.weight {
-                                Weight::Bold => write!(w, csi!("{}m"), Attribute::Bold.sgr())?,
-                                Weight::Normal => {}
-                                Weight::Light => write!(w, csi!("{}m"), Attribute::Dim.sgr())?,
-                            }
+                    if effective_style.weight != text_style.weight {
+                        match effective_style.weight {
+                            Weight::Bold => write!(w, csi!("{}m"), Attribute::Bold.sgr())?,
+                            Weight::Normal => {}
+                            Weight::Light => write!(w, csi!("{}m"), Attribute::Dim.sgr())?,
                         }
+                    }
 
-                        if c.style.underline && !text_style.underline {
-                            write!(w, csi!("{}m"), Attribute::Underlined.sgr())?;
-                        }
+                    if effective_style.underline && !text_style.underline {
+                        write!(w, csi!("{}m"), Attribute::Underlined.sgr())?;
+                    }
 
-                        if c.style.italic && !text_style.italic {
-                            write!(w, csi!("{}m"), Attribute::Italic.sgr())?;
-                        }
+                    if effective_style.italic && !text_style.italic {
+                        write!(w, csi!("{}m"), Attribute::Italic.sgr())?;
+                    }
 
-                        if c.style.invert && !text_style.invert {
-                            write!(w, csi!("{}m"), Attribute::Reverse.sgr())?;
-                        }
+                    if effective_style.invert && !text_style.invert {
+                        write!(w, csi!("{}m"), Attribute::Reverse.sgr())?;
+                    }
 
-                        text_style = c.style;
+                    text_style = effective_style;
+                } else if ansi && !has_style {
+                    // Empty cell without overlay — reset active attributes if needed.
+                    if text_style.underline || text_style.invert {
+                        write!(w, csi!("0m"))?;
+                        background_color = None;
+                        text_style = CanvasTextStyle::default();
                     }
                 }
 
@@ -352,13 +488,13 @@ impl Canvas {
                     did_clear_line = true;
                 }
 
-                if ansi && cell.background_color != background_color {
+                if ansi && effective_bg != background_color {
                     write!(
                         w,
                         csi!("{}m"),
-                        Colored::BackgroundColor(cell.background_color.unwrap_or(Color::Reset))
+                        Colored::BackgroundColor(effective_bg.unwrap_or(Color::Reset))
                     )?;
-                    background_color = cell.background_color;
+                    background_color = effective_bg;
                 }
 
                 if let Some(c) = &cell.character {
@@ -514,6 +650,24 @@ impl CanvasSubviewMut<'_> {
             (right - left).max(0) as _,
             (bottom - top).max(0) as _,
         );
+    }
+
+    /// Sets a style overlay on a cell at the given **relative** subview position.
+    /// Out-of-bounds or outside-clip positions are silently ignored.
+    pub fn set_overlay(&mut self, x: isize, y: isize, overlay: StyleOverlay) {
+        let abs_x = self.x + x;
+        let abs_y = self.y + y;
+        if abs_x < self.clip_x
+            || abs_y < self.clip_y
+            || abs_x < 0
+            || abs_y < 0
+            || abs_x >= self.clip_x + self.clip_width as isize
+            || abs_y >= self.clip_y + self.clip_height as isize
+        {
+            return;
+        }
+        self.canvas
+            .set_overlay(abs_x as usize, abs_y as usize, overlay);
     }
 
     /// Writes text to the region.
@@ -1012,6 +1166,199 @@ line two
         assert_eq!(sv.cell(6, 0), None);
         assert_eq!(sv.cell(0, -1), None);
         assert_eq!(sv.cell(0, 3), None);
+    }
+
+    #[test]
+    fn test_overlay_merges_invert_into_resolved_style() {
+        let mut canvas = Canvas::new(5, 1);
+        let style = CanvasTextStyle {
+            color: Some(Color::Red),
+            weight: Weight::Bold,
+            ..Default::default()
+        };
+        canvas
+            .subview_mut(0, 0, 0, 0, 5, 1)
+            .set_text(0, 0, "hello", style);
+        canvas.set_overlay(
+            1,
+            0,
+            StyleOverlay {
+                invert: Some(true),
+                ..Default::default()
+            },
+        );
+        let resolved = canvas.resolved_text_style(1, 0).unwrap();
+        assert!(resolved.invert);
+        assert_eq!(resolved.color, Some(Color::Red));
+        assert_eq!(resolved.weight, Weight::Bold);
+        // Cell without overlay keeps original style.
+        let original = canvas.resolved_text_style(0, 0).unwrap();
+        assert!(!original.invert);
+    }
+
+    #[test]
+    fn test_overlay_on_empty_cell_emits_sgr_reverse() {
+        let mut canvas = Canvas::new(3, 1);
+        canvas.set_overlay(
+            1,
+            0,
+            StyleOverlay {
+                invert: Some(true),
+                ..Default::default()
+            },
+        );
+        let mut buf = Vec::new();
+        canvas.write_ansi(&mut buf).unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        assert!(
+            output.contains(&Attribute::Reverse.sgr().to_string()),
+            "expected SGR Reverse in output: {output:?}"
+        );
+    }
+
+    #[test]
+    fn test_overlay_rect_applies_to_all_cells_in_range() {
+        let mut canvas = Canvas::new(5, 2);
+        canvas
+            .subview_mut(0, 0, 0, 0, 5, 2)
+            .set_text(0, 0, "abcde", CanvasTextStyle::default());
+        canvas
+            .subview_mut(0, 0, 0, 0, 5, 2)
+            .set_text(0, 1, "fghij", CanvasTextStyle::default());
+        canvas.set_overlay_rect(
+            1,
+            0,
+            3,
+            2,
+            StyleOverlay {
+                invert: Some(true),
+                ..Default::default()
+            },
+        );
+        for y in 0..2 {
+            for x in 0..5 {
+                let resolved = canvas.resolved_text_style(x, y);
+                let expected_invert = (1..4).contains(&x);
+                assert_eq!(
+                    resolved.map(|s| s.invert).unwrap_or(false),
+                    expected_invert,
+                    "cell ({x},{y}) invert mismatch"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_clear_overlay_removes_inversion() {
+        let mut canvas = Canvas::new(3, 1);
+        canvas
+            .subview_mut(0, 0, 0, 0, 3, 1)
+            .set_text(0, 0, "abc", CanvasTextStyle::default());
+        canvas.set_overlay(
+            1,
+            0,
+            StyleOverlay {
+                invert: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(canvas.resolved_text_style(1, 0).unwrap().invert);
+        canvas.clear_overlay(1, 0);
+        assert!(!canvas.resolved_text_style(1, 0).unwrap().invert);
+    }
+
+    #[test]
+    fn test_clear_overlays_resets_all() {
+        let mut canvas = Canvas::new(3, 1);
+        canvas
+            .subview_mut(0, 0, 0, 0, 3, 1)
+            .set_text(0, 0, "abc", CanvasTextStyle::default());
+        canvas.set_overlay_rect(
+            0,
+            0,
+            3,
+            1,
+            StyleOverlay {
+                invert: Some(true),
+                ..Default::default()
+            },
+        );
+        canvas.clear_overlays();
+        for x in 0..3 {
+            assert!(!canvas.resolved_text_style(x, 0).unwrap().invert);
+        }
+    }
+
+    #[test]
+    fn test_overlay_background_color_override() {
+        let mut canvas = Canvas::new(3, 1);
+        canvas
+            .subview_mut(0, 0, 0, 0, 3, 1)
+            .set_background_color(0, 0, 3, 1, Color::Red);
+        canvas.set_overlay(
+            1,
+            0,
+            StyleOverlay {
+                background_color: Some(Some(Color::Blue)),
+                ..Default::default()
+            },
+        );
+        let mut buf = Vec::new();
+        canvas.write_ansi(&mut buf).unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        // Cell 0 should have Red background, cell 1 should have Blue (overridden by overlay).
+        assert!(output.contains(&format!("{}", Colored::BackgroundColor(Color::Blue))));
+    }
+
+    #[test]
+    fn test_subview_set_overlay_respects_clip() {
+        let mut canvas = Canvas::new(10, 5);
+        canvas.subview_mut(0, 0, 0, 0, 10, 5).set_text(
+            0,
+            0,
+            "0123456789",
+            CanvasTextStyle::default(),
+        );
+        // Subview at (2,1) with clip width 4. Overlay at relative (0,0) = absolute (2,1).
+        {
+            let mut sv = canvas.subview_mut(2, 1, 2, 1, 4, 3);
+            sv.set_overlay(
+                0,
+                0,
+                StyleOverlay {
+                    invert: Some(true),
+                    ..Default::default()
+                },
+            );
+            // Out-of-clip: relative (-1, 0) should be silently ignored.
+            sv.set_overlay(
+                -1,
+                0,
+                StyleOverlay {
+                    invert: Some(true),
+                    ..Default::default()
+                },
+            );
+        }
+        // Absolute (2,1) should have overlay; absolute (1,1) should not.
+        assert!(
+            canvas
+                .overlays
+                .get(1)
+                .and_then(|r| r.get(2))
+                .and_then(|o| o.as_ref())
+                .is_some(),
+            "overlay at abs (2,1) should exist"
+        );
+        assert!(
+            canvas
+                .overlays
+                .get(1)
+                .and_then(|r| r.get(1))
+                .and_then(|o| o.as_ref())
+                .is_none(),
+            "overlay at abs (1,1) should NOT exist (out of clip)"
+        );
     }
 
     #[test]
