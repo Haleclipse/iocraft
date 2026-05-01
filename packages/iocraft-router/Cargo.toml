@@ -1,0 +1,13 @@
+[package]
+name = "iocraft-router"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Declarative router for iocraft TUI framework with reactive state, history stack, and builder API."
+
+[dependencies]
+iocraft = { path = "../iocraft" }
+thiserror = "2"
+
+[dev-dependencies]
+smol = "2.0.1"
