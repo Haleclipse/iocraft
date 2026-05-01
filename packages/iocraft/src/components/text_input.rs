@@ -6,10 +6,46 @@ use crate::{
     segmented_string::SegmentedString,
     AnyElement, CanvasTextStyle, Color, Component, ComponentDrawer, ComponentUpdater, HandlerMut,
     Hook, Hooks, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, LayoutStyle, Overflow, Position,
-    Props, Size, TerminalEvent,
+    Props, Size, StyleOverlay, TerminalEvent,
 };
 use std::sync::Arc;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+trait UseCursorOverlay {
+    fn use_cursor_overlay(&mut self) -> &mut CursorOverlayState;
+}
+
+impl UseCursorOverlay for Hooks<'_, '_> {
+    fn use_cursor_overlay(&mut self) -> &mut CursorOverlayState {
+        self.use_hook(CursorOverlayState::default)
+    }
+}
+
+#[derive(Default)]
+struct CursorOverlayState {
+    col: u16,
+    row: u16,
+    char_width: u16,
+    active: bool,
+}
+
+impl Hook for CursorOverlayState {
+    fn post_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+        if !self.active {
+            return;
+        }
+        // Cursor rendering is pure style inversion (SGR Reverse), which lets the
+        // terminal's own theme determine the contrasted foreground/background pair.
+        let overlay = StyleOverlay {
+            invert: Some(true),
+            ..Default::default()
+        };
+        let mut canvas = drawer.canvas();
+        for offset in 0..self.char_width {
+            canvas.set_overlay((self.col + offset) as isize, self.row as isize, overlay);
+        }
+    }
+}
 
 /// A handle which can be used for imperative control of a [`TextInput`] component.
 ///
@@ -91,9 +127,6 @@ pub struct TextInputProps {
 
     /// If true, the input will fill 100% of the height of its container and handle multiline input.
     pub multiline: bool,
-
-    /// The color to make the cursor. Defaults to gray.
-    pub cursor_color: Option<Color>,
 
     /// An optional handle which can be used for imperative control of the input.
     pub handle: Option<Ref<TextInputHandle>>,
@@ -414,6 +447,24 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
         }
     }
 
+    // Cursor overlay: post-render styling at the cursor position, replacing the old
+    // extra absolute-positioned background block view. The hook applies the overlay in
+    // post_component_draw — after TextBufferView has drawn the text — so the cursor is a
+    // pure style layer that doesn't interfere with the text content.
+    let cursor_overlay = hooks.use_cursor_overlay();
+    cursor_overlay.active = has_focus;
+    cursor_overlay.col = cursor_col.saturating_sub(scroll_offset_col.get());
+    cursor_overlay.row = cursor_row.saturating_sub(scroll_offset_row.get());
+    cursor_overlay.char_width = if has_focus && cursor_offset.get() < props.value.len() {
+        props.value[cursor_offset.get()..]
+            .chars()
+            .next()
+            .map(|c| c.width().unwrap_or(0).max(1) as u16)
+            .unwrap_or(1)
+    } else {
+        1
+    };
+
     hooks.use_terminal_events({
         let buffer = buffer.clone();
         let mut value = props.value.clone();
@@ -536,13 +587,6 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     element! {
         View(overflow: Overflow::Hidden, width: 100pct, height: if multiline { Size::Percent(100.0) } else { Size::Length(1) }, position: Position::Relative) {
             View(position: Position::Absolute, top: -(scroll_offset_row.get() as i32), left: -(scroll_offset_col.get() as i32)) {
-                #(if has_focus {
-                    Some(element! {
-                        View(position: Position::Absolute, top: cursor_row, left: cursor_col, width: 1, height: 1, background_color: props.cursor_color.unwrap_or(Color::Grey))
-                    })
-                } else {
-                    None
-                })
                 TextBufferView(
                     buffer,
                     color: props.color,
@@ -609,7 +653,7 @@ fn new_cursor_offset(
 mod tests {
     use super::*;
     use crate::prelude::*;
-    use futures::stream::StreamExt;
+    use futures::stream::{self, StreamExt};
     use macro_rules_attribute::apply;
     use smol_macros::test;
 
@@ -654,6 +698,39 @@ mod tests {
                     value: value.to_string(),
                     on_change: move |new_value| value.set(new_value),
                     multiline: true,
+                )
+            }
+        }
+    }
+
+    #[derive(Default, Props)]
+    struct CursorProbeProps {
+        initial_value: String,
+        width: Size,
+        height: Size,
+        multiline: bool,
+    }
+
+    #[component]
+    fn CursorProbe(mut hooks: Hooks, props: &CursorProbeProps) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut should_exit = hooks.use_state(|| false);
+        hooks.use_terminal_events(move |event| {
+            if matches!(event, TerminalEvent::Resize(..)) {
+                should_exit.set(true);
+            }
+        });
+        if should_exit.get() {
+            system.exit();
+        }
+
+        element! {
+            View(width: props.width, height: props.height) {
+                TextInput(
+                    has_focus: true,
+                    value: props.initial_value.clone(),
+                    on_change: |_| {},
+                    multiline: props.multiline,
                 )
             }
         }
@@ -770,6 +847,63 @@ mod tests {
             .await;
         let expected = vec!["  \n\n\n", " foo\n ! \n\n"];
         assert_eq!(actual, expected);
+    }
+
+    #[apply(test!)]
+    async fn test_default_cursor_uses_pure_inversion_without_forced_white() {
+        let canvases: Vec<_> = element! {
+            CursorProbe(initial_value: "".to_string(), width: 3, height: 1)
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(stream::iter(vec![
+            TerminalEvent::Resize(80, 24),
+        ])))
+        .collect()
+        .await;
+
+        let first = &canvases[0];
+        let style = first
+            .resolved_text_style(0, 0)
+            .expect("cursor overlay missing");
+        assert!(style.invert, "default cursor should invert the cell");
+        assert_eq!(
+            style.color, None,
+            "default cursor should not force white fg"
+        );
+    }
+
+    #[apply(test!)]
+    async fn test_cursor_overlay_covers_both_cells_of_wide_character() {
+        let canvases: Vec<_> = element! {
+            CursorProbe(initial_value: "一二".to_string(), width: 6, height: 1)
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(stream::iter(vec![
+            TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Left)),
+            TerminalEvent::Resize(80, 24),
+        ])))
+        .collect()
+        .await;
+
+        let last = canvases.last().unwrap();
+        assert!(last.resolved_text_style(2, 0).unwrap().invert);
+        assert!(last.resolved_text_style(3, 0).unwrap().invert);
+    }
+
+    #[apply(test!)]
+    async fn test_cursor_overlay_is_visible_at_multiline_trailing_newline_eof() {
+        let canvases: Vec<_> = element! {
+            CursorProbe(initial_value: "a\n".to_string(), width: 4, height: 2, multiline: true)
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(stream::iter(vec![
+            TerminalEvent::Resize(80, 24),
+        ])))
+        .collect()
+        .await;
+
+        let first = &canvases[0];
+        let style = first
+            .resolved_text_style(0, 1)
+            .expect("expected cursor overlay on trailing newline row");
+        assert!(style.invert);
     }
 
     #[test]
