@@ -14,11 +14,11 @@ struct LocationData {
 
 impl LocationData {
     async fn fetch() -> Result<Self> {
-        Ok(surf::get("http://ip-api.com/json")
+        surf::get("http://ip-api.com/json")
             .recv_json()
             .await
             .map_err(|e| anyhow!(e))
-            .context("failed to fetch location data")?)
+            .context("failed to fetch location data")
     }
 }
 
@@ -76,7 +76,7 @@ impl WeatherDataCurrent {
             71 | 77 => Color::White,
             73 | 75 | 85 | 86 => Color::White,
             80 => Color::Cyan,
-            95 | 96 | 97 => Color::Yellow,
+            95..=97 => Color::Yellow,
             _ => Color::White,
         }
     }
@@ -92,7 +92,7 @@ impl WeatherDataCurrent {
             71 | 77 => "❄️",
             73 | 75 | 85 | 86 => "🌨️",
             80 => "🌦️",
-            95 | 96 | 97 => "⛈️",
+            95..=97 => "⛈️",
             _ => "❓",
         }
     }
@@ -117,7 +117,7 @@ struct WeatherData {
 impl WeatherData {
     async fn fetch() -> Result<Self> {
         let location = LocationData::fetch().await?;
-        let mut ret: Self = surf::get(&format!(
+        let mut ret: Self = surf::get(format!(
             "https://api.open-meteo.com/v1/forecast?latitude={}&longitude={}&current=temperature_2m,relative_humidity_2m,precipitation_probability",
             location.lat, location.lon
         )).recv_json().await.map_err(|e| anyhow!(e)).context("failed to fetch weather data")?;
