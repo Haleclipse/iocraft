@@ -622,9 +622,12 @@ mod tests {
         view_element.key();
         view_element.print();
         view_element.eprint();
-        (&mut view_element).key();
-        (&mut view_element).print();
-        (&mut view_element).eprint();
+        #[allow(clippy::needless_borrow)]
+        {
+            (&mut view_element).key();
+            (&mut view_element).print();
+            (&mut view_element).eprint();
+        }
 
         #[cfg(unix)]
         view_element.write_to_raw_fd(std::io::stdout()).unwrap();
@@ -633,9 +636,12 @@ mod tests {
         any_element.key();
         any_element.print();
         any_element.eprint();
-        (&mut any_element).key();
-        (&mut any_element).print();
-        (&mut any_element).eprint();
+        #[allow(clippy::needless_borrow)]
+        {
+            (&mut any_element).key();
+            (&mut any_element).print();
+            (&mut any_element).eprint();
+        }
 
         let mut view_element = element!(View);
         let mut any_element_ref: AnyElement = (&mut view_element).into();

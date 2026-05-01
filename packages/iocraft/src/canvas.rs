@@ -1090,10 +1090,11 @@ mod tests {
     #[test]
     fn test_get_text_single_row() {
         let mut canvas = Canvas::new(10, 3);
-        let mut sv = canvas.subview_mut(0, 0, 0, 0, 10, 3);
-        sv.set_text(0, 0, "hello", CanvasTextStyle::default());
-        sv.set_text(2, 1, "ab", CanvasTextStyle::default());
-        drop(sv);
+        {
+            let mut sv = canvas.subview_mut(0, 0, 0, 0, 10, 3);
+            sv.set_text(0, 0, "hello", CanvasTextStyle::default());
+            sv.set_text(2, 1, "ab", CanvasTextStyle::default());
+        }
         assert_eq!(canvas.get_text(0, 0, 10, 1), "hello");
         assert_eq!(canvas.get_text(0, 1, 10, 1), "  ab");
         assert_eq!(canvas.get_text(0, 2, 10, 1), "");
@@ -1102,10 +1103,11 @@ mod tests {
     #[test]
     fn test_get_text_multi_row() {
         let mut canvas = Canvas::new(10, 3);
-        let mut sv = canvas.subview_mut(0, 0, 0, 0, 10, 3);
-        sv.set_text(0, 0, "line one", CanvasTextStyle::default());
-        sv.set_text(0, 1, "line two", CanvasTextStyle::default());
-        drop(sv);
+        {
+            let mut sv = canvas.subview_mut(0, 0, 0, 0, 10, 3);
+            sv.set_text(0, 0, "line one", CanvasTextStyle::default());
+            sv.set_text(0, 1, "line two", CanvasTextStyle::default());
+        }
         assert_eq!(
             canvas.get_text(0, 0, 10, 3),
             "line one
