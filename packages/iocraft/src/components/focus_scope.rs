@@ -15,44 +15,40 @@ pub struct FocusScopeProps<'a> {
     /// `Esc` to clear it. Set to `false` if you want to drive focus entirely through
     /// [`FocusManager`](crate::FocusManager) and avoid touching keyboard input.
     pub handle_keys: Option<bool>,
+
+    /// If `true`, this scope **consumes** the keys it handles
+    /// (via [`PropagatedTerminalEvent::stop_propagation`](crate::PropagatedTerminalEvent::stop_propagation)),
+    /// preventing enclosing scopes from also acting on them. Defaults to `false`.
+    ///
+    /// Because hooks are polled depth-first, a nested trapping scope (e.g. a modal
+    /// dialog) sees Tab before its ancestors. With `trap_keys: true` the modal owns
+    /// Tab/Esc exclusively while mounted; without it, ancestor scopes advance their
+    /// own focus ring in parallel (the sibling-friendly default).
+    pub trap_keys: Option<bool>,
 }
 
 /// `FocusScope` defines a focus group: a subtree in which any descendant calling
 /// [`use_focus`](crate::hooks::UseFocus::use_focus) participates in the same `Tab` traversal.
 ///
-/// # What "independent" means here
+/// # State independence and event isolation
 ///
-/// `FocusScope` provides **state independence**, not **event isolation**. Every scope
-/// owns a private [`FocusContext`](crate::FocusContext) in its own `use_state` slot,
-/// so each scope has its own entry list, its own "currently focused" id, and its own
-/// Tab ring. That is the part that is truly isolated: writing to one scope's focus
-/// state never touches another scope's focus state.
+/// Every scope owns a private [`FocusContext`](crate::FocusContext) in its own
+/// `use_state` slot, so each scope has its own entry list, its own "currently focused"
+/// id, and its own Tab ring — **state independence** is unconditional.
 ///
-/// What is **not** isolated is terminal-event delivery. iocraft broadcasts every
-/// terminal key event to every `use_terminal_events` subscriber — there is no
-/// event-consumption / event-stealing primitive in the current render loop — so if
-/// two `FocusScope`s are mounted at the same time and both have `handle_keys = true`,
-/// a single Tab press will reach both of them and both will advance their (private)
-/// focus ring in parallel.
+/// **Event isolation** is opt-in via [`trap_keys`](FocusScopeProps::trap_keys):
 ///
-/// # Consequences
-///
-/// - **Sibling scopes** (e.g. two independent forms on the same screen): this is
-///   usually exactly what you want. Each form tracks its own selection, and Tab
-///   advances both at once. The visible effect is "each form is self-contained".
-/// - **Truly nested scopes** (e.g. a modal dialog spawned inside a parent form):
-///   by default this will feel wrong, because the outer scope keeps processing Tab
-///   while the modal is open. The supported pattern is:
-///     1. Give the inner scope `handle_keys: Some(false)` so it does *not*
-///        intercept key events at all.
-///     2. Drive its focus from the outside via
-///        [`FocusManager`](crate::FocusManager) — typically from a custom keybinding
-///        inside the modal's own `use_terminal_events` closure.
-///   The `nested_scope_with_manual_driving_is_isolated` regression test in this
-///   file demonstrates the recommended wiring end-to-end.
-///
-/// A future iocraft release may add real event stealing. Until then, treat "Tab is
-/// routed to exactly one scope" as an opt-in configuration, not a default guarantee.
+/// - **Sibling scopes** (e.g. two independent forms on the same screen) usually want
+///   the default (`trap_keys: false`): each form tracks its own selection and Tab
+///   advances both in parallel, so each form appears self-contained.
+/// - **Nested scopes** (e.g. a modal dialog spawned inside a parent form) should set
+///   `trap_keys: Some(true)` on the inner scope. Hooks are polled depth-first, so the
+///   modal sees Tab before its ancestors and consumes it
+///   (via [`PropagatedTerminalEvent::stop_propagation`](crate::PropagatedTerminalEvent::stop_propagation)),
+///   giving it exclusive ownership of Tab/Esc while mounted.
+/// - For fully manual control, `handle_keys: Some(false)` makes the scope ignore
+///   keyboard input entirely; drive it via [`FocusManager`](crate::FocusManager)
+///   from custom keybindings instead.
 ///
 /// # Example
 ///
@@ -97,7 +93,8 @@ pub fn FocusScope<'a>(
     //   - `true  → false`: the previously-installed hook is *not* removed; it stays in
     //     the vector and keeps consuming key events, so the prop appears to do nothing.
     let handle_keys = props.handle_keys.unwrap_or(true);
-    hooks.use_terminal_events(move |event| {
+    let trap_keys = props.trap_keys.unwrap_or(false);
+    hooks.use_propagated_terminal_events(move |propagated| {
         if !handle_keys {
             return;
         }
@@ -105,17 +102,32 @@ pub fn FocusScope<'a>(
             code,
             modifiers,
             kind,
-        }) = event
+        }) = propagated.event()
         {
-            if kind == KeyEventKind::Release {
+            if *kind == KeyEventKind::Release {
                 return;
             }
-            match code {
-                KeyCode::BackTab => ctx.focus_prev(),
-                KeyCode::Tab if modifiers.contains(KeyModifiers::SHIFT) => ctx.focus_prev(),
-                KeyCode::Tab => ctx.focus_next(),
-                KeyCode::Esc => ctx.clear(),
-                _ => {}
+            let handled = match code {
+                KeyCode::BackTab => {
+                    ctx.focus_prev();
+                    true
+                }
+                KeyCode::Tab if modifiers.contains(KeyModifiers::SHIFT) => {
+                    ctx.focus_prev();
+                    true
+                }
+                KeyCode::Tab => {
+                    ctx.focus_next();
+                    true
+                }
+                KeyCode::Esc => {
+                    ctx.clear();
+                    true
+                }
+                _ => false,
+            };
+            if handled && trap_keys {
+                propagated.stop_propagation();
             }
         }
     });
@@ -420,6 +432,76 @@ mod tests {
         assert!(
             !last.contains("in-b*"),
             "inner must not intercept Tab: {last:?}"
+        );
+    }
+
+    // ----- Regression coverage for trap_keys event consumption (P0-2) -----
+
+    /// An inner FocusScope with `trap_keys: Some(true)` consumes Tab via
+    /// stop_propagation. Because hooks are polled depth-first (children's hooks
+    /// before ancestors'), the inner scope sees Tab first and the OUTER scope
+    /// never acts on it — true event isolation for modal-style UIs.
+    #[component]
+    fn InnerTrapping() -> impl Into<AnyElement<'static>> {
+        element! {
+            FocusScope(trap_keys: Some(true)) {
+                View(flex_direction: FlexDirection::Column) {
+                    Item(label: "in-a".to_string())
+                    Item(label: "in-b".to_string())
+                }
+            }
+        }
+    }
+
+    #[component]
+    fn NestedTrappingScopes(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut presses = hooks.use_state(|| 0u32);
+        // Plain use_terminal_events is a bypass listener: it must still observe
+        // consumed events, so the exit counter works regardless of trapping.
+        hooks.use_terminal_events(move |e| {
+            if let TerminalEvent::Key(KeyEvent {
+                kind: KeyEventKind::Press,
+                ..
+            }) = e
+            {
+                presses += 1;
+            }
+        });
+        if presses.get() >= 2 {
+            system.exit();
+        }
+        element! {
+            FocusScope {
+                View(flex_direction: FlexDirection::Column) {
+                    Item(label: "out-a".to_string())
+                    Item(label: "out-b".to_string())
+                    InnerTrapping
+                }
+            }
+        }
+    }
+
+    #[apply(test!)]
+    async fn nested_trapping_scope_consumes_tab_exclusively() {
+        let canvases: Vec<_> = element!(NestedTrappingScopes)
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(stream::iter(vec![
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Tab)),
+                TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Tab)),
+            ])))
+            .collect()
+            .await;
+        let last = canvases.last().unwrap().to_string();
+        // The inner (trapping) scope advanced twice: in-a → in-b.
+        assert!(last.contains("in-b*"), "expected in-b* in {last:?}");
+        // The outer scope never saw Tab: no outer item is focused.
+        assert!(
+            !last.contains("out-a*"),
+            "outer must not act on trapped Tab: {last:?}"
+        );
+        assert!(
+            !last.contains("out-b*"),
+            "outer must not act on trapped Tab: {last:?}"
         );
     }
 

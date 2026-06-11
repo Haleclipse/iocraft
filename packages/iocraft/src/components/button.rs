@@ -41,24 +41,28 @@ pub struct ButtonProps<'a> {
 /// ```
 #[component]
 pub fn Button<'a>(mut hooks: Hooks, props: &mut ButtonProps<'a>) -> impl Into<AnyElement<'a>> {
-    hooks.use_local_terminal_events({
+    hooks.use_local_propagated_terminal_events({
         let mut handler = props.handler.take();
         let has_focus = props.has_focus;
-        move |event| match event {
-            TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
-                kind: MouseEventKind::Down(_),
-                ..
-            }) => {
+        move |event| {
+            let handled = match event.event() {
+                TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
+                    kind: MouseEventKind::Down(_),
+                    ..
+                }) => true,
+                TerminalEvent::Key(KeyEvent { code, kind, .. })
+                    if has_focus
+                        && *kind == KeyEventKind::Press
+                        && (*code == KeyCode::Enter || *code == KeyCode::Char(' ')) =>
+                {
+                    true
+                }
+                _ => false,
+            };
+            if handled {
                 handler(());
+                event.stop_propagation();
             }
-            TerminalEvent::Key(KeyEvent { code, kind, .. })
-                if has_focus
-                    && kind != KeyEventKind::Release
-                    && (code == KeyCode::Enter || code == KeyCode::Char(' ')) =>
-            {
-                handler(());
-            }
-            _ => {}
         }
     });
 
@@ -122,5 +126,47 @@ mod tests {
             .await;
         let expected = vec!["Exit\n"];
         assert_eq!(actual, expected);
+    }
+
+    #[component]
+    fn RepeatComponent(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut triggered = hooks.use_state(|| false);
+        let mut repeats = hooks.use_state(|| 0);
+
+        hooks.use_terminal_events(move |event| {
+            if let TerminalEvent::Key(KeyEvent {
+                kind: KeyEventKind::Repeat,
+                ..
+            }) = event
+            {
+                repeats += 1;
+            }
+        });
+
+        if repeats.get() >= 1 {
+            system.exit();
+        }
+
+        element! {
+            Button(handler: move |_| triggered.set(true), has_focus: true) {
+                Text(content: if triggered.get() { "triggered" } else { "idle" })
+            }
+        }
+    }
+
+    #[apply(test!)]
+    async fn test_button_ignores_repeat_events() {
+        let actual = element!(RepeatComponent)
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(futures::stream::iter(
+                vec![TerminalEvent::Key(KeyEvent::new(
+                    KeyEventKind::Repeat,
+                    KeyCode::Enter,
+                ))],
+            )))
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(actual, vec!["idle\n"]);
     }
 }

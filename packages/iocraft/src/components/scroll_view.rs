@@ -336,10 +336,10 @@ pub fn ScrollView<'a>(
         }
     }
 
-    hooks.use_terminal_events({
+    hooks.use_local_propagated_terminal_events({
         let vh = viewport_height;
         move |event| {
-            let delta = match &event {
+            let delta = match event.event() {
                 TerminalEvent::Key(KeyEvent { code, kind, .. })
                     if *kind != KeyEventKind::Release =>
                 {
@@ -366,8 +366,9 @@ pub fn ScrollView<'a>(
             };
 
             if let Some(delta) = delta {
-                let new_offset =
-                    clamp_offset(scroll_offset.get() + delta, content_height.get(), vh.get());
+                let old_offset = scroll_offset.get();
+                let old_user_scrolled_up = user_scrolled_up.get();
+                let new_offset = clamp_offset(old_offset + delta, content_height.get(), vh.get());
                 scroll_offset.set(new_offset);
 
                 if auto_scroll {
@@ -377,6 +378,10 @@ pub fn ScrollView<'a>(
                     } else if new_offset >= max {
                         user_scrolled_up.set(false);
                     }
+                }
+
+                if new_offset != old_offset || user_scrolled_up.get() != old_user_scrolled_up {
+                    event.stop_propagation();
                 }
             }
         }
