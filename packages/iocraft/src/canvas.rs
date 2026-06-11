@@ -152,6 +152,7 @@ pub struct Canvas {
     width: usize,
     cells: Vec<Vec<CanvasCell>>,
     overlays: Vec<Vec<Option<StyleOverlay>>>,
+    cursor_declaration: Option<(usize, usize)>,
 }
 
 impl Canvas {
@@ -161,7 +162,27 @@ impl Canvas {
             width,
             cells: vec![vec![CanvasCell::default(); width]; height],
             overlays: vec![vec![None; width]; height],
+            cursor_declaration: None,
         }
+    }
+
+    /// Declares that the physical terminal cursor should be placed at the given canvas
+    /// position after this canvas is written to the terminal.
+    ///
+    /// This is how text inputs anchor the operating system's IME pre-edit window (and
+    /// screen readers) to the caret: the renderer moves the real cursor there and makes
+    /// it visible once the frame has been committed. Only one declaration can be active
+    /// per frame — the last writer wins. When no component declares a cursor, the
+    /// physical cursor remains hidden.
+    pub fn declare_cursor(&mut self, x: usize, y: usize) {
+        if y < self.cells.len() && x < self.width {
+            self.cursor_declaration = Some((x, y));
+        }
+    }
+
+    /// Returns the declared physical cursor position for this frame, if any.
+    pub fn cursor_declaration(&self) -> Option<(usize, usize)> {
+        self.cursor_declaration
     }
 
     /// Returns the width of the canvas.
@@ -696,6 +717,24 @@ impl CanvasSubviewMut<'_> {
             (right - left).max(0) as _,
             (bottom - top).max(0) as _,
         );
+    }
+
+    /// Declares the physical cursor position at the given **relative** subview position.
+    /// Out-of-bounds or outside-clip positions are silently ignored.
+    /// See [`Canvas::declare_cursor`].
+    pub fn declare_cursor(&mut self, x: isize, y: isize) {
+        let abs_x = self.x + x;
+        let abs_y = self.y + y;
+        if abs_x < self.clip_x
+            || abs_y < self.clip_y
+            || abs_x < 0
+            || abs_y < 0
+            || abs_x >= self.clip_x + self.clip_width as isize
+            || abs_y >= self.clip_y + self.clip_height as isize
+        {
+            return;
+        }
+        self.canvas.declare_cursor(abs_x as usize, abs_y as usize);
     }
 
     /// Sets a style overlay on a cell at the given **relative** subview position.
@@ -1419,6 +1458,36 @@ line two
                 .is_none(),
             "overlay at abs (1,1) should NOT exist (out of clip)"
         );
+    }
+
+    #[test]
+    fn test_declare_cursor_bounds_and_subview_translation() {
+        let mut canvas = Canvas::new(10, 5);
+        assert_eq!(canvas.cursor_declaration(), None);
+
+        // Out-of-bounds declarations are ignored.
+        canvas.declare_cursor(10, 0);
+        canvas.declare_cursor(0, 5);
+        assert_eq!(canvas.cursor_declaration(), None);
+
+        canvas.declare_cursor(3, 2);
+        assert_eq!(canvas.cursor_declaration(), Some((3, 2)));
+
+        // Last writer wins.
+        canvas.declare_cursor(1, 1);
+        assert_eq!(canvas.cursor_declaration(), Some((1, 1)));
+
+        // Subview translates relative coordinates and respects clipping.
+        {
+            let mut sv = canvas.subview_mut(2, 1, 2, 1, 4, 3);
+            sv.declare_cursor(1, 1); // absolute (3, 2)
+        }
+        assert_eq!(canvas.cursor_declaration(), Some((3, 2)));
+        {
+            let mut sv = canvas.subview_mut(2, 1, 2, 1, 4, 3);
+            sv.declare_cursor(-1, 0); // outside clip — ignored
+        }
+        assert_eq!(canvas.cursor_declaration(), Some((3, 2)));
     }
 
     #[test]

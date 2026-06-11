@@ -485,6 +485,15 @@ impl<'a> Tree<'a> {
                         prev_canvas.as_ref()
                     };
                     term.write_canvas(prev, &output.canvas)?;
+                    // Position (or hide) the physical cursor after the frame has been
+                    // committed, so IMEs and screen readers can anchor to the caret of
+                    // a focused text input.
+                    term.position_cursor(
+                        output
+                            .canvas
+                            .cursor_declaration()
+                            .map(|(x, y)| (x as u16, y as u16)),
+                    )?;
                 }
                 prev_canvas = Some(output.canvas);
                 Ok(())
