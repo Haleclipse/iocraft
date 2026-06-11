@@ -6,7 +6,6 @@ use crossterm::{
 };
 use futures::{
     channel::mpsc,
-    future::pending,
     stream::{self, BoxStream, Stream, StreamExt},
 };
 use std::{
@@ -128,12 +127,116 @@ trait TerminalImpl: Write + Send {
         Ok(())
     }
 
+    /// Polls for a pending "resumed from suspension" signal (SIGCONT on unix). Used by
+    /// [`Terminal::wait`] to wake the render loop so it can repair the display after the
+    /// user foregrounds the process (e.g. Ctrl+Z followed by `fg`).
+    fn poll_resumed(&mut self, _cx: &mut Context<'_>) -> Poll<()> {
+        Poll::Pending
+    }
+
+    /// Returns `true` (and clears the flag) if the process was resumed from suspension
+    /// since the last call.
+    fn take_resumed(&mut self) -> bool {
+        false
+    }
+
+    /// Re-applies terminal modes and clears cached output state after the process was
+    /// resumed from suspension. The shell typically restores cooked mode while the app
+    /// is stopped, so raw mode (and friends) must be re-enabled unconditionally, and the
+    /// next canvas write must not assume anything previously on screen survived.
+    fn reinitialize_after_resume(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
     fn is_raw_mode_enabled(&self) -> bool;
     fn clear_canvas(&mut self) -> io::Result<()>;
     fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()>;
     fn event_stream(&mut self) -> io::Result<BoxStream<'static, TerminalEvent>>;
     fn dest(&mut self) -> &mut dyn Write;
     fn alt(&mut self) -> &mut dyn Write;
+}
+
+/// State shared between the SIGCONT listener thread and the render loop.
+#[cfg(unix)]
+struct ResumeSignalShared {
+    resumed: std::sync::atomic::AtomicBool,
+    waker: Mutex<Option<Waker>>,
+}
+
+/// Listens for SIGCONT on a dedicated thread and records it in shared state.
+///
+/// signal-hook's iterator API is used so the actual signal handler only performs an
+/// async-signal-safe self-pipe write; the (signal-unsafe) waker invocation happens on
+/// this listener thread, in normal thread context.
+#[cfg(unix)]
+struct ResumeSignalListener {
+    shared: Arc<ResumeSignalShared>,
+    handle: signal_hook::iterator::Handle,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(unix)]
+impl ResumeSignalListener {
+    fn new() -> io::Result<Self> {
+        use std::sync::atomic::AtomicBool;
+
+        let shared = Arc::new(ResumeSignalShared {
+            resumed: AtomicBool::new(false),
+            waker: Mutex::new(None),
+        });
+        let mut signals =
+            signal_hook::iterator::Signals::new([signal_hook::consts::signal::SIGCONT])?;
+        let handle = signals.handle();
+        let thread_shared = shared.clone();
+        let thread = std::thread::Builder::new()
+            .name("iocraft-sigcont".into())
+            .spawn(move || {
+                for _ in &mut signals {
+                    thread_shared
+                        .resumed
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    if let Some(waker) = thread_shared.waker.lock().unwrap().take() {
+                        waker.wake();
+                    }
+                }
+            })?;
+        Ok(Self {
+            shared,
+            handle,
+            thread: Some(thread),
+        })
+    }
+
+    fn poll_resumed(&self, cx: &mut Context<'_>) -> Poll<()> {
+        use std::sync::atomic::Ordering;
+        if self.shared.resumed.load(Ordering::SeqCst) {
+            return Poll::Ready(());
+        }
+        *self.shared.waker.lock().unwrap() = Some(cx.waker().clone());
+        // Re-check to close the race where the signal arrived between the first load
+        // and the waker registration.
+        if self.shared.resumed.load(Ordering::SeqCst) {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+
+    fn take_resumed(&self) -> bool {
+        self.shared
+            .resumed
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ResumeSignalListener {
+    fn drop(&mut self) {
+        self.handle.close();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 fn clear_canvas_inline(
@@ -164,6 +267,8 @@ struct StdTerminal<'a> {
     prev_canvas_height: u16,
     prev_size_on_write: Option<(u16, u16)>,
     size: Option<(u16, u16)>,
+    #[cfg(unix)]
+    resume_signal: Option<ResumeSignalListener>,
 }
 
 impl Write for StdTerminal<'_> {
@@ -196,6 +301,51 @@ impl TerminalImpl for StdTerminal<'_> {
                 }
             }
         }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn poll_resumed(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        match &self.resume_signal {
+            Some(signal) => signal.poll_resumed(cx),
+            None => Poll::Pending,
+        }
+    }
+
+    #[cfg(unix)]
+    fn take_resumed(&mut self) -> bool {
+        self.resume_signal
+            .as_ref()
+            .is_some_and(|signal| signal.take_resumed())
+    }
+
+    fn reinitialize_after_resume(&mut self) -> io::Result<()> {
+        // The shell restored cooked mode while we were stopped, but our bookkeeping
+        // still says raw mode is on. Re-apply every terminal mode unconditionally,
+        // bypassing set_raw_mode_enabled's change detection.
+        if self.raw_mode_enabled {
+            terminal::enable_raw_mode()?;
+            if self.enabled_keyboard_enhancement {
+                self.dest.execute(event::PushKeyboardEnhancementFlags(
+                    event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+                ))?;
+            }
+            if self.mouse_capture {
+                self.dest.execute(event::EnableMouseCapture)?;
+            }
+            self.dest.execute(event::EnableBracketedPaste)?;
+        }
+        self.dest.queue(cursor::Hide)?;
+        if self.fullscreen {
+            self.dest.queue(terminal::EnterAlternateScreen)?;
+        }
+        // Anything we previously drew can no longer be trusted: in inline mode the
+        // shell printed over our output; in fullscreen mode we just re-entered the
+        // alternate screen, which starts blank. Treat the next write as a first
+        // write so the canvas is fully re-rendered rather than row-diffed.
+        self.prev_canvas_height = 0;
+        self.prev_canvas_top_row = 0;
+        self.prev_size_on_write = None;
         Ok(())
     }
 
@@ -420,6 +570,10 @@ impl<'a> StdTerminal<'a> {
             prev_canvas_height: 0,
             size: None,
             prev_size_on_write: None,
+            // Best-effort: if signal registration fails, the terminal still works —
+            // it just won't self-heal after suspend/resume.
+            #[cfg(unix)]
+            resume_signal: ResumeSignalListener::new().ok(),
         };
         term.dest.queue(cursor::Hide)?;
         if fullscreen {
@@ -641,6 +795,19 @@ impl<'a> Terminal<'a> {
         self.received_ctrl_c
     }
 
+    /// Returns `true` (and clears the flag) if the process was resumed from suspension
+    /// (SIGCONT) since the last call. The render loop uses this to trigger a full
+    /// terminal reinitialization and redraw.
+    pub fn take_resumed(&mut self) -> bool {
+        self.inner.take_resumed()
+    }
+
+    /// Re-applies terminal modes and resets cached output state after a resume from
+    /// suspension. See [`TerminalImpl::reinitialize_after_resume`].
+    pub fn reinitialize_after_resume(&mut self) -> io::Result<()> {
+        self.inner.reinitialize_after_resume()
+    }
+
     /// Returns a mutable reference to the stdout handle.
     pub fn stdout(&mut self) -> &mut dyn Write {
         match self.output {
@@ -673,37 +840,52 @@ impl<'a> Terminal<'a> {
     }
 
     pub async fn wait(&mut self) {
+        use futures::future::{poll_fn, select, Either};
+
         match &mut self.event_stream {
-            Some(event_stream) => {
-                while let Some(event) = event_stream.next().await {
-                    if !self.ignore_ctrl_c {
-                        if let TerminalEvent::Key(KeyEvent {
-                            code: KeyCode::Char('c'),
-                            kind: KeyEventKind::Press,
-                            modifiers: KeyModifiers::CONTROL,
-                        }) = event
-                        {
-                            self.received_ctrl_c = true;
-                        }
-                        if self.received_ctrl_c {
-                            return;
-                        }
+            Some(event_stream) => loop {
+                // Race the next terminal event against the resume (SIGCONT) signal so
+                // the render loop wakes immediately when the process is foregrounded,
+                // even with no pending input.
+                let inner = &mut self.inner;
+                let next =
+                    match select(event_stream.next(), poll_fn(|cx| inner.poll_resumed(cx))).await {
+                        Either::Left((next, _)) => next,
+                        Either::Right(((), _)) => return,
+                    };
+                let Some(event) = next else {
+                    return;
+                };
+                if !self.ignore_ctrl_c {
+                    if let TerminalEvent::Key(KeyEvent {
+                        code: KeyCode::Char('c'),
+                        kind: KeyEventKind::Press,
+                        modifiers: KeyModifiers::CONTROL,
+                    }) = event
+                    {
+                        self.received_ctrl_c = true;
                     }
-                    self.subscribers.retain(|subscriber| {
-                        if let Some(subscriber) = subscriber.upgrade() {
-                            let mut subscriber = subscriber.lock().unwrap();
-                            subscriber.pending.push_back(event.clone());
-                            if let Some(waker) = subscriber.waker.take() {
-                                waker.wake();
-                            }
-                            true
-                        } else {
-                            false
-                        }
-                    });
+                    if self.received_ctrl_c {
+                        return;
+                    }
                 }
+                self.subscribers.retain(|subscriber| {
+                    if let Some(subscriber) = subscriber.upgrade() {
+                        let mut subscriber = subscriber.lock().unwrap();
+                        subscriber.pending.push_back(event.clone());
+                        if let Some(waker) = subscriber.waker.take() {
+                            waker.wake();
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                });
+            },
+            None => {
+                let inner = &mut self.inner;
+                poll_fn(|cx| inner.poll_resumed(cx)).await;
             }
-            None => pending().await,
         }
     }
 
@@ -1012,6 +1194,8 @@ mod tests {
             prev_canvas_height,
             size: None,
             prev_size_on_write: None,
+            #[cfg(unix)]
+            resume_signal: None,
         }
     }
 
@@ -1036,6 +1220,8 @@ mod tests {
             prev_canvas_height,
             size: Some(term_size),
             prev_size_on_write: None,
+            #[cfg(unix)]
+            resume_signal: None,
         }
     }
 
@@ -1054,6 +1240,24 @@ mod tests {
         let mut vt = avt::Vt::new(term_size.0 as _, term_size.1 as _);
         vt.feed_str(&String::from_utf8(setup).unwrap());
         (diff, vt)
+    }
+
+    /// After a resume from suspension, the terminal must forget everything it knew
+    /// about previously written output, so the next write_canvas behaves like a
+    /// first write (full render at the current cursor position) instead of a row
+    /// diff against content that the shell has since overwritten.
+    #[test]
+    fn test_reinitialize_after_resume_resets_output_state() {
+        let (dest, _buf) = new_test_writer();
+        let mut term = new_inline_term(dest, 5);
+        term.prev_size_on_write = Some((10, 10));
+        term.prev_canvas_top_row = 3;
+
+        term.reinitialize_after_resume().unwrap();
+
+        assert_eq!(term.prev_canvas_height, 0);
+        assert_eq!(term.prev_canvas_top_row, 0);
+        assert_eq!(term.prev_size_on_write, None);
     }
 
     #[test]

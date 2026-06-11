@@ -464,6 +464,15 @@ impl<'a> Tree<'a> {
         let mut prev_canvas: Option<Canvas> = None;
         let mut mouse_capture_enabled: Option<bool> = None;
         loop {
+            // Self-healing: if the process was just resumed from suspension (Ctrl+Z
+            // followed by `fg`), the shell has reset the terminal modes and overwritten
+            // parts of the screen. Re-apply our modes and forget the previous canvas so
+            // the next write is a full redraw rather than a row diff against content
+            // that no longer exists.
+            if term.take_resumed() {
+                term.reinitialize_after_resume()?;
+                prev_canvas = None;
+            }
             term.refresh_size();
             let terminal_size = term.size();
             term.synchronized_update(|mut term| {
