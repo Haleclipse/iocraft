@@ -94,8 +94,64 @@ pub enum TerminalEvent {
     Paste(String),
 }
 
+/// Propagation state shared by every subscriber's copy of a single terminal event.
+///
+/// When the terminal forwards an event to its subscribers, each subscriber's queue entry
+/// carries a clone of the same `Arc<SharedEventState>`. A subscriber that consumes the
+/// event marks it stopped, and propagation-aware subscribers that are polled later skip
+/// it. Because component hooks are polled depth-first (children before their parents'
+/// hooks), this yields bubble-like semantics: the deepest interested component sees the
+/// event first, and ancestors only see it if no descendant consumed it.
+#[derive(Default)]
+pub(crate) struct SharedEventState {
+    stopped: std::sync::atomic::AtomicBool,
+}
+
+impl SharedEventState {
+    pub(crate) fn stop_propagation(&self) {
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn is_propagation_stopped(&self) -> bool {
+        self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// A terminal event paired with its shared propagation state, as delivered to
+/// [`use_propagated_terminal_events`](crate::hooks::UseTerminalEvents::use_propagated_terminal_events)
+/// callbacks.
+pub struct PropagatedTerminalEvent {
+    event: TerminalEvent,
+    state: Arc<SharedEventState>,
+}
+
+impl PropagatedTerminalEvent {
+    pub(crate) fn new(event: TerminalEvent, state: Arc<SharedEventState>) -> Self {
+        Self { event, state }
+    }
+
+    /// The underlying terminal event.
+    pub fn event(&self) -> &TerminalEvent {
+        &self.event
+    }
+
+    /// Marks the event as consumed. Propagation-aware subscribers in ancestor
+    /// components will not receive it. Plain
+    /// [`use_terminal_events`](crate::hooks::UseTerminalEvents::use_terminal_events)
+    /// subscribers are unaffected — they observe every event regardless.
+    pub fn stop_propagation(&self) {
+        self.state.stop_propagation();
+    }
+
+    /// Returns `true` if a previously-polled subscriber consumed this event.
+    pub fn is_propagation_stopped(&self) -> bool {
+        self.state.is_propagation_stopped()
+    }
+}
+
 struct TerminalEventsInner {
-    pending: VecDeque<TerminalEvent>,
+    pending: VecDeque<(TerminalEvent, Arc<SharedEventState>)>,
     waker: Option<Waker>,
 }
 
@@ -104,17 +160,29 @@ pub struct TerminalEvents {
     inner: Arc<Mutex<TerminalEventsInner>>,
 }
 
-impl Stream for TerminalEvents {
-    type Item = TerminalEvent;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+impl TerminalEvents {
+    /// Polls for the next event together with its shared propagation state.
+    pub(crate) fn poll_next_shared(
+        &mut self,
+        cx: &mut Context,
+    ) -> Poll<Option<(TerminalEvent, Arc<SharedEventState>)>> {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(event) = inner.pending.pop_front() {
-            Poll::Ready(Some(event))
+        if let Some(entry) = inner.pending.pop_front() {
+            Poll::Ready(Some(entry))
         } else {
             inner.waker = Some(cx.waker().clone());
             Poll::Pending
         }
+    }
+}
+
+impl Stream for TerminalEvents {
+    type Item = TerminalEvent;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        self.get_mut()
+            .poll_next_shared(cx)
+            .map(|opt| opt.map(|(event, _)| event))
     }
 }
 
@@ -1014,10 +1082,15 @@ impl<'a> Terminal<'a> {
                         return;
                     }
                 }
+                // All subscribers share one propagation state per event, so a consumer
+                // in a deeply-nested component can stop ancestors from acting on it.
+                let shared_state = Arc::new(SharedEventState::default());
                 self.subscribers.retain(|subscriber| {
                     if let Some(subscriber) = subscriber.upgrade() {
                         let mut subscriber = subscriber.lock().unwrap();
-                        subscriber.pending.push_back(event.clone());
+                        subscriber
+                            .pending
+                            .push_back((event.clone(), shared_state.clone()));
                         if let Some(waker) = subscriber.waker.take() {
                             waker.wake();
                         }

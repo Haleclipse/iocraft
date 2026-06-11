@@ -1,9 +1,11 @@
-use crate::{ComponentUpdater, FullscreenMouseEvent, Hook, Hooks, TerminalEvent, TerminalEvents};
+use crate::{
+    ComponentUpdater, FullscreenMouseEvent, Hook, Hooks, PropagatedTerminalEvent, TerminalEvent,
+    TerminalEvents,
+};
 use core::{
-    pin::{pin, Pin},
+    pin::Pin,
     task::{Context, Poll},
 };
-use futures::stream::Stream;
 use taffy::{Point, Size};
 
 mod private {
@@ -94,6 +96,10 @@ pub trait UseTerminalEvents: private::Sealed {
     /// This hook will be called for all terminal events, including those that occur outside of the
     /// component. If you only want to listen for events within the component, use
     /// [`Self::use_local_terminal_events`] instead.
+    ///
+    /// Callbacks registered this way observe **every** event, even ones consumed via
+    /// [`PropagatedTerminalEvent::stop_propagation`] — they are bypass listeners,
+    /// suitable for global concerns such as "press q to quit".
     fn use_terminal_events<F>(&mut self, f: F)
     where
         F: FnMut(TerminalEvent) + Send + 'static;
@@ -106,10 +112,26 @@ pub trait UseTerminalEvents: private::Sealed {
     fn use_local_terminal_events<F>(&mut self, f: F)
     where
         F: FnMut(TerminalEvent) + Send + 'static;
+
+    /// Defines a propagation-aware callback for terminal events.
+    ///
+    /// Unlike [`Self::use_terminal_events`], events that were consumed via
+    /// [`PropagatedTerminalEvent::stop_propagation`] by an earlier subscriber are
+    /// skipped, and the callback itself may consume events to hide them from
+    /// later propagation-aware subscribers.
+    ///
+    /// Hooks are polled depth-first — a component's children are polled before its own
+    /// hooks — so the deepest interested component sees each event first and ancestors
+    /// only see it if no descendant consumed it. This mirrors DOM-style event bubbling:
+    /// a nested component (e.g. a modal's [`FocusScope`](crate::components::FocusScope))
+    /// can capture Tab without its ancestors also acting on it.
+    fn use_propagated_terminal_events<F>(&mut self, f: F)
+    where
+        F: FnMut(&PropagatedTerminalEvent) + Send + 'static;
 }
 
 impl UseTerminalEvents for Hooks<'_, '_> {
-    fn use_terminal_events<F>(&mut self, f: F)
+    fn use_terminal_events<F>(&mut self, mut f: F)
     where
         F: FnMut(TerminalEvent) + Send + 'static,
     {
@@ -117,12 +139,15 @@ impl UseTerminalEvents for Hooks<'_, '_> {
             events: None,
             component_location: Default::default(),
             in_component: false,
+            propagation_aware: false,
             f: None,
         });
-        h.f = Some(Box::new(f));
+        h.f = Some(Box::new(move |event: &PropagatedTerminalEvent| {
+            f(event.event().clone())
+        }));
     }
 
-    fn use_local_terminal_events<F>(&mut self, f: F)
+    fn use_local_terminal_events<F>(&mut self, mut f: F)
     where
         F: FnMut(TerminalEvent) + Send + 'static,
     {
@@ -130,26 +155,51 @@ impl UseTerminalEvents for Hooks<'_, '_> {
             events: None,
             component_location: Default::default(),
             in_component: true,
+            propagation_aware: false,
+            f: None,
+        });
+        h.f = Some(Box::new(move |event: &PropagatedTerminalEvent| {
+            f(event.event().clone())
+        }));
+    }
+
+    fn use_propagated_terminal_events<F>(&mut self, f: F)
+    where
+        F: FnMut(&PropagatedTerminalEvent) + Send + 'static,
+    {
+        let h = self.use_hook(move || UseTerminalEventsImpl {
+            events: None,
+            component_location: Default::default(),
+            in_component: false,
+            propagation_aware: true,
             f: None,
         });
         h.f = Some(Box::new(f));
     }
 }
 
+type EventCallback = Box<dyn FnMut(&PropagatedTerminalEvent) + Send + 'static>;
+
 struct UseTerminalEventsImpl {
     events: Option<TerminalEvents>,
     component_location: (Point<i16>, Size<u16>),
     in_component: bool,
-    f: Option<Box<dyn FnMut(TerminalEvent) + Send + 'static>>,
+    propagation_aware: bool,
+    f: Option<EventCallback>,
 }
 
 impl Hook for UseTerminalEventsImpl {
     fn poll_change(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        while let Some(Poll::Ready(Some(event))) = self
+        while let Some(Poll::Ready(Some((event, state)))) = self
             .events
             .as_mut()
-            .map(|events| pin!(events).poll_next(cx))
+            .map(|events| events.poll_next_shared(cx))
         {
+            // Propagation-aware subscribers skip events already consumed by an
+            // earlier (deeper) subscriber. Plain subscribers observe everything.
+            if self.propagation_aware && state.is_propagation_stopped() {
+                continue;
+            }
             if self.in_component {
                 let (location, size) = self.component_location;
                 match event {
@@ -159,23 +209,26 @@ impl Hook for UseTerminalEventsImpl {
                             let column = (event.column as i16 - location.x) as u16;
                             if row < size.height && column < size.width {
                                 if let Some(f) = &mut self.f {
-                                    f(TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
-                                        row,
-                                        column,
-                                        ..event
-                                    }));
+                                    f(&PropagatedTerminalEvent::new(
+                                        TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
+                                            row,
+                                            column,
+                                            ..event
+                                        }),
+                                        state,
+                                    ));
                                 }
                             }
                         }
                     }
                     TerminalEvent::Key(_) | TerminalEvent::Resize(..) | TerminalEvent::Paste(_) => {
                         if let Some(f) = &mut self.f {
-                            f(event);
+                            f(&PropagatedTerminalEvent::new(event, state));
                         }
                     }
                 }
             } else if let Some(f) = &mut self.f {
-                f(event);
+                f(&PropagatedTerminalEvent::new(event, state));
             }
         }
         Poll::Pending
