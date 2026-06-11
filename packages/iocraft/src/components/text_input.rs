@@ -476,6 +476,35 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
             }
 
             match event {
+                TerminalEvent::Paste(text) => {
+                    // Bracketed paste delivers the entire pasted text as one event, so
+                    // we insert it in a single pass: one on_change, one re-render —
+                    // instead of one per character. In single-line mode, newlines are
+                    // replaced with spaces (matching typical browser input behavior).
+                    let text = if multiline {
+                        text
+                    } else {
+                        let mut normalized = String::with_capacity(text.len());
+                        let mut chars = text.chars().peekable();
+                        while let Some(ch) = chars.next() {
+                            match ch {
+                                '\r' => {
+                                    if matches!(chars.peek(), Some('\n')) {
+                                        chars.next();
+                                    }
+                                    normalized.push(' ');
+                                }
+                                '\n' => normalized.push(' '),
+                                other => normalized.push(other),
+                            }
+                        }
+                        normalized
+                    };
+                    value.insert_str(temp_cursor_offset, &text);
+                    temp_cursor_offset += text.len();
+                    on_change(value.clone());
+                    vertical_movement_col_preference.set(None);
+                }
                 TerminalEvent::Key(KeyEvent {
                     code,
                     kind,
@@ -754,6 +783,41 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
         let expected = vec!["  \n", " foo! \n"];
+        assert_eq!(actual, expected);
+    }
+
+    #[apply(test!)]
+    async fn test_text_input_paste() {
+        // A bracketed paste delivers the whole text as one event and one insertion.
+        let actual = element!(MyComponent)
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(futures::stream::iter(
+                vec![
+                    TerminalEvent::Paste("foo".to_string()),
+                    TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('!'))),
+                ],
+            )))
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .await;
+        let expected = vec!["  \n", " foo! \n"];
+        assert_eq!(actual, expected);
+    }
+
+    #[apply(test!)]
+    async fn test_text_input_paste_strips_newlines_in_single_line_mode() {
+        // Pasting multi-line text into a single-line input must not be interpreted
+        // as pressing Enter; newlines are replaced with spaces.
+        let actual = element!(MyComponent)
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(futures::stream::iter(
+                vec![
+                    TerminalEvent::Paste("a\r\nb".to_string()),
+                    TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('!'))),
+                ],
+            )))
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .await;
+        let expected = vec!["  \n", " a b! \n"];
         assert_eq!(actual, expected);
     }
 
