@@ -20,6 +20,11 @@ unicode-width = "0.1.13"
 generational-box = "0.5.6"
 regex = "1.12.3"
 
+[target.'cfg(unix)'.dependencies]
+# Already present in crossterm's unix dependency tree; used directly for
+# SIGCONT-based self-healing redraws after Ctrl+Z suspend/resume.
+signal-hook = "0.3"
+
 [dev-dependencies]
 avt = "0.17"
 indoc = "2"
