@@ -460,7 +460,11 @@ impl<'a> Tree<'a> {
         }
     }
 
-    async fn terminal_render_loop(&mut self, mut term: Terminal<'_>) -> io::Result<()> {
+    async fn terminal_render_loop(
+        &mut self,
+        mut term: Terminal<'_>,
+        throttle: Option<std::time::Duration>,
+    ) -> io::Result<()> {
         let mut prev_canvas: Option<Canvas> = None;
         let mut mouse_capture_enabled: Option<bool> = None;
         loop {
@@ -498,6 +502,7 @@ impl<'a> Tree<'a> {
                 prev_canvas = Some(output.canvas);
                 Ok(())
             })?;
+            let last_frame = std::time::Instant::now();
             if let Some(requested) = self.system_context.mouse_capture() {
                 if mouse_capture_enabled != Some(requested) {
                     if requested {
@@ -515,6 +520,40 @@ impl<'a> Tree<'a> {
             if term.received_ctrl_c() {
                 break;
             }
+            // Frame throttling: after the first change, keep absorbing further changes
+            // until the frame interval has elapsed, so high-frequency state updates
+            // (animations, streaming output, progress ticks) coalesce into one frame.
+            //
+            // Crucially this keeps polling the component tree the whole time: component
+            // futures (use_future et al) are driven by this loop, so a plain sleep
+            // would freeze them and merely slow the app down instead of coalescing.
+            // Input latency is bounded by the interval (≤ ~17ms at the default 60fps).
+            if let Some(throttle) = throttle {
+                let last = last_frame;
+                loop {
+                    let remaining = throttle.saturating_sub(last.elapsed());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    let timed_out = {
+                        let timer = futures_timer::Delay::new(remaining);
+                        matches!(
+                            futures::future::select(
+                                timer,
+                                select(self.root_component.wait().boxed(), term.wait().boxed()),
+                            )
+                            .await,
+                            futures::future::Either::Left(_)
+                        )
+                    };
+                    if timed_out || term.received_ctrl_c() {
+                        break;
+                    }
+                }
+                if term.received_ctrl_c() {
+                    break;
+                }
+            }
         }
         Ok(())
     }
@@ -526,13 +565,17 @@ pub(crate) fn render<E: ElementExt>(mut e: E, max_width: Option<usize>) -> Canva
     tree.render(max_width, None).canvas
 }
 
-pub(crate) async fn terminal_render_loop<E>(e: &mut E, term: Terminal<'_>) -> io::Result<()>
+pub(crate) async fn terminal_render_loop<E>(
+    e: &mut E,
+    term: Terminal<'_>,
+    throttle: Option<std::time::Duration>,
+) -> io::Result<()>
 where
     E: ElementExt,
 {
     let h = e.helper();
     let mut tree = Tree::new(e.props_mut(), h);
-    tree.terminal_render_loop(term).await
+    tree.terminal_render_loop(term, throttle).await
 }
 
 pub(crate) struct MockTerminalRenderLoop<'a> {
@@ -564,7 +607,9 @@ where
 {
     let (term, output) = Terminal::mock(config);
     MockTerminalRenderLoop {
-        render_loop: terminal_render_loop(e, term).boxed_local(),
+        // No throttling for mock terminals: tests rely on deterministic, immediate
+        // frame production.
+        render_loop: terminal_render_loop(e, term, None).boxed_local(),
         render_loop_is_done: false,
         output,
     }
@@ -632,6 +677,82 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    /// A component that updates state rapidly (every poll) until 20 updates have
+    /// occurred. With throttling enabled, many updates coalesce into few frames.
+    #[component]
+    fn RapidComponent(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut tick = hooks.use_state(|| 0u32);
+
+        hooks.use_future(async move {
+            for _ in 0..20 {
+                // Yield so each increment lands in a separate poll cycle, then bump.
+                futures_timer::Delay::new(std::time::Duration::from_millis(1)).await;
+                tick += 1;
+            }
+        });
+
+        if tick >= 20 {
+            system.exit();
+        }
+
+        element!(Text(content: format!("tick: {}", tick)))
+    }
+
+    #[apply(test!)]
+    async fn test_render_loop_throttling_coalesces_frames() {
+        // Without throttling: ~one frame per tick (21 frames including the initial).
+        let unthrottled: Vec<_> = {
+            let mut element = element!(RapidComponent);
+            let (term, output) = Terminal::mock(MockTerminalConfig::default());
+            let mut h = element.helper();
+            let render_loop = async {
+                let mut tree = Tree::new(element.props_mut(), h);
+                tree.terminal_render_loop(term, None).await.unwrap();
+            };
+            let collect = output.collect::<Vec<_>>();
+            let (_, canvases) = futures::join!(render_loop, collect);
+            h = element.helper();
+            let _ = h;
+            canvases
+        };
+
+        // With a 50ms throttle: the 20 ticks (at ~1ms apart) coalesce into far fewer
+        // frames — at most a handful of throttle windows pass during the run.
+        let throttled: Vec<_> = {
+            let mut element = element!(RapidComponent);
+            let h = element.helper();
+            let (term, output) = Terminal::mock(MockTerminalConfig::default());
+            let render_loop = async {
+                let mut tree = Tree::new(element.props_mut(), h);
+                tree.terminal_render_loop(term, Some(std::time::Duration::from_millis(50)))
+                    .await
+                    .unwrap();
+            };
+            let collect = output.collect::<Vec<_>>();
+            let (_, canvases) = futures::join!(render_loop, collect);
+            canvases
+        };
+
+        assert!(
+            unthrottled.len() > throttled.len(),
+            "throttling should reduce frame count: unthrottled={} throttled={}",
+            unthrottled.len(),
+            throttled.len()
+        );
+        // Conservative bound to avoid CI timing flakiness: 20 ticks at 1ms within
+        // 50ms windows should need well under half the unthrottled frame count.
+        assert!(
+            throttled.len() <= unthrottled.len() / 2,
+            "expected at most half the frames: unthrottled={} throttled={}",
+            unthrottled.len(),
+            throttled.len()
+        );
+        // Both runs must end on the final state.
+        assert!(throttled.last().unwrap().to_string().contains("tick: 20"));
+        assert!(unthrottled.last().unwrap().to_string().contains("tick: 20"));
+    }
+
     async fn await_send_future<F: Future<Output = io::Result<()>> + Send>(f: F) {
         f.await.unwrap();
     }
@@ -640,7 +761,7 @@ mod tests {
     #[apply(test!)]
     async fn test_terminal_render_loop_send() {
         let (term, _output) = Terminal::mock(MockTerminalConfig::default());
-        await_send_future(terminal_render_loop(&mut element!(MyComponent), term)).await;
+        await_send_future(terminal_render_loop(&mut element!(MyComponent), term, None)).await;
     }
 
     #[component]
