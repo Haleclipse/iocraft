@@ -305,10 +305,14 @@ enum RenderLoopFutureState<'a, E: ElementExt> {
         output: Output,
         stdout_writer: Option<Box<dyn Write + Send + 'a>>,
         stderr_writer: Option<Box<dyn Write + Send + 'a>>,
+        throttle: Option<std::time::Duration>,
         element: &'a mut E,
     },
     Running(Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>),
 }
+
+/// The default render-loop frame interval (~60fps).
+const DEFAULT_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_micros(16_667);
 
 /// A future that renders an element in a loop, allowing it to be dynamic and interactive.
 ///
@@ -329,9 +333,41 @@ impl<'a, E: ElementExt + 'a> RenderLoopFuture<'a, E> {
                 output: Output::default(),
                 stdout_writer: None,
                 stderr_writer: None,
+                throttle: Some(DEFAULT_FRAME_INTERVAL),
                 element,
             },
         }
+    }
+
+    /// Caps the render rate at the given number of frames per second. High-frequency
+    /// state updates (animations, streaming output) coalesce into at most one frame
+    /// per interval. Defaults to 60fps.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `fps` is zero.
+    pub fn max_fps(mut self, fps: u32) -> Self {
+        assert!(fps > 0, "max_fps must be greater than zero");
+        match &mut self.state {
+            RenderLoopFutureState::Init { throttle, .. } => {
+                *throttle = Some(std::time::Duration::from_secs_f64(1.0 / fps as f64));
+            }
+            _ => panic!("max_fps() must be called before polling the future"),
+        }
+        self
+    }
+
+    /// Disables frame throttling entirely: every state change triggers an immediate
+    /// render. Useful when you need minimal latency and your state update rate is
+    /// already bounded.
+    pub fn without_throttle(mut self) -> Self {
+        match &mut self.state {
+            RenderLoopFutureState::Init { throttle, .. } => {
+                *throttle = None;
+            }
+            _ => panic!("without_throttle() must be called before polling the future"),
+        }
+        self
     }
 
     /// Renders the element as fullscreen in a loop, allowing it to be dynamic and interactive.
@@ -469,6 +505,7 @@ impl<'a, E: ElementExt + Send + 'a> Future for RenderLoopFuture<'a, E> {
                         output,
                         stdout_writer,
                         stderr_writer,
+                        throttle,
                         element,
                     ) = match std::mem::replace(&mut self.state, RenderLoopFutureState::Empty) {
                         RenderLoopFutureState::Init {
@@ -478,6 +515,7 @@ impl<'a, E: ElementExt + Send + 'a> Future for RenderLoopFuture<'a, E> {
                             output,
                             stdout_writer,
                             stderr_writer,
+                            throttle,
                             element,
                         } => (
                             fullscreen,
@@ -486,6 +524,7 @@ impl<'a, E: ElementExt + Send + 'a> Future for RenderLoopFuture<'a, E> {
                             output,
                             stdout_writer,
                             stderr_writer,
+                            throttle,
                             element,
                         ),
                         _ => unreachable!(),
@@ -514,7 +553,7 @@ impl<'a, E: ElementExt + Send + 'a> Future for RenderLoopFuture<'a, E> {
                     if ignore_ctrl_c {
                         terminal.ignore_ctrl_c();
                     }
-                    let fut = Box::pin(terminal_render_loop(element, terminal));
+                    let fut = Box::pin(terminal_render_loop(element, terminal, throttle));
                     self.state = RenderLoopFutureState::Running(fut);
                 }
                 RenderLoopFutureState::Running(fut) => {

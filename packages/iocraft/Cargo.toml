@@ -19,6 +19,8 @@ bitflags = "2.6.0"
 unicode-width = "0.1.13"
 generational-box = "0.5.6"
 regex = "1.12.3"
+# Runtime-agnostic timer used for render-loop frame throttling.
+futures-timer = "3"
 
 [target.'cfg(unix)'.dependencies]
 # Already present in crossterm's unix dependency tree; used directly for
