@@ -255,6 +255,75 @@ fn clear_canvas_inline(
     }
 }
 
+/// Global bookkeeping for the panic hook that restores the terminal to a usable state
+/// before the default hook prints the panic message and backtrace.
+///
+/// Without this, a panic in fullscreen mode is invisible: the message goes to the
+/// alternate screen, which is discarded when the process exits and the shell restores
+/// the main screen. Raw mode similarly survives the panic, leaving the user's shell
+/// with no echo and broken line input.
+struct PanicRestoreState {
+    /// Number of live `StdTerminal`s that have modified terminal state. The hook is a
+    /// no-op when this is zero (e.g. after a clean shutdown).
+    live_terminals: usize,
+    /// Whether any live terminal is in fullscreen (alternate screen) mode.
+    fullscreen: bool,
+}
+
+static PANIC_RESTORE_STATE: Mutex<PanicRestoreState> = Mutex::new(PanicRestoreState {
+    live_terminals: 0,
+    fullscreen: false,
+});
+
+static INSTALL_PANIC_HOOK: std::sync::Once = std::sync::Once::new();
+
+/// Best-effort terminal restoration, safe to call from a panic hook. Writes go directly
+/// to stdout: raw mode is a tty-level state (restored via ioctl, not the stream), and
+/// the escape sequences reach the same tty regardless of which stream the renderer was
+/// configured to use.
+fn restore_terminal_for_panic() {
+    let state = PANIC_RESTORE_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if state.live_terminals == 0 {
+        return;
+    }
+    let mut stdout = io::stdout();
+    let _ = terminal::disable_raw_mode();
+    let _ = stdout.queue(event::DisableBracketedPaste);
+    let _ = stdout.queue(event::DisableMouseCapture);
+    if state.fullscreen {
+        let _ = stdout.queue(terminal::LeaveAlternateScreen);
+    }
+    let _ = stdout.queue(cursor::Show);
+    let _ = stdout.flush();
+}
+
+fn register_terminal_for_panic_restore(fullscreen: bool) {
+    INSTALL_PANIC_HOOK.call_once(|| {
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore_terminal_for_panic();
+            prev_hook(info);
+        }));
+    });
+    let mut state = PANIC_RESTORE_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.live_terminals += 1;
+    state.fullscreen |= fullscreen;
+}
+
+fn unregister_terminal_for_panic_restore() {
+    let mut state = PANIC_RESTORE_STATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.live_terminals = state.live_terminals.saturating_sub(1);
+    if state.live_terminals == 0 {
+        state.fullscreen = false;
+    }
+}
+
 struct StdTerminal<'a> {
     input_is_terminal: bool,
     dest: Box<dyn Write + Send + 'a>,
@@ -579,6 +648,7 @@ impl<'a> StdTerminal<'a> {
         if fullscreen {
             term.dest.queue(terminal::EnterAlternateScreen)?;
         }
+        register_terminal_for_panic_restore(fullscreen);
         Ok(term)
     }
 
@@ -624,6 +694,7 @@ impl Drop for StdTerminal<'_> {
             let _ = self.dest.write_all(b"\r\n");
         }
         let _ = self.dest.execute(cursor::Show);
+        unregister_terminal_for_panic_restore();
     }
 }
 
@@ -1240,6 +1311,39 @@ mod tests {
         let mut vt = avt::Vt::new(term_size.0 as _, term_size.1 as _);
         vt.feed_str(&String::from_utf8(setup).unwrap());
         (diff, vt)
+    }
+
+    /// The panic-restore registry must track live terminals and reset the fullscreen
+    /// flag once the last one is gone, so the hook becomes a no-op after clean shutdown.
+    #[test]
+    fn test_panic_restore_registration_counts() {
+        // Snapshot the baseline: other tests may have live terminals.
+        let baseline = {
+            let state = PANIC_RESTORE_STATE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.live_terminals
+        };
+
+        register_terminal_for_panic_restore(true);
+        register_terminal_for_panic_restore(false);
+        {
+            let state = PANIC_RESTORE_STATE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(state.live_terminals, baseline + 2);
+            assert!(state.fullscreen);
+        }
+
+        unregister_terminal_for_panic_restore();
+        unregister_terminal_for_panic_restore();
+        if baseline == 0 {
+            let state = PANIC_RESTORE_STATE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            assert_eq!(state.live_terminals, 0);
+            assert!(!state.fullscreen, "fullscreen flag must reset at zero");
+        }
     }
 
     /// After a resume from suspension, the terminal must forget everything it knew
