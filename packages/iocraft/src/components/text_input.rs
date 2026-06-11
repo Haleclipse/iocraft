@@ -44,6 +44,10 @@ impl Hook for CursorOverlayState {
         for offset in 0..self.char_width {
             canvas.set_overlay((self.col + offset) as isize, self.row as isize, overlay);
         }
+        // Also anchor the physical terminal cursor here so the operating system's IME
+        // pre-edit window (and screen readers) follow the caret. The inverted overlay
+        // remains the visible cursor; the physical cursor is what input methods track.
+        canvas.declare_cursor(self.col as isize, self.row as isize);
     }
 }
 
@@ -784,6 +788,28 @@ mod tests {
             .await;
         let expected = vec!["  \n", " foo! \n"];
         assert_eq!(actual, expected);
+    }
+
+    /// A focused TextInput must declare the physical cursor position on the canvas so
+    /// the renderer can anchor the terminal cursor (and thus the IME pre-edit window)
+    /// to the caret.
+    #[apply(test!)]
+    async fn test_text_input_declares_physical_cursor() {
+        let canvases: Vec<_> = element!(MyComponent)
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(futures::stream::iter(
+                vec![
+                    TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('f'))),
+                    TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('!'))),
+                ],
+            )))
+            .collect::<Vec<_>>()
+            .await;
+        // Initial frame: empty value, caret at the input's origin. MyComponent has
+        // padding_left: 1, so the input's canvas-absolute origin is column 1.
+        assert_eq!(canvases[0].cursor_declaration(), Some((1, 0)));
+        // After typing "f" then "!", the caret has advanced past the typed text.
+        let last = canvases.last().unwrap();
+        assert_eq!(last.cursor_declaration(), Some((3, 0)));
     }
 
     #[apply(test!)]

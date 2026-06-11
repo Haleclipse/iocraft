@@ -148,6 +148,13 @@ trait TerminalImpl: Write + Send {
         Ok(())
     }
 
+    /// Moves the physical terminal cursor to the given canvas position and shows it, or
+    /// hides it when `declaration` is `None`. Called after each canvas write so IMEs and
+    /// screen readers can anchor to the caret of a focused text input.
+    fn position_cursor(&mut self, _declaration: Option<(u16, u16)>) -> io::Result<()> {
+        Ok(())
+    }
+
     fn is_raw_mode_enabled(&self) -> bool;
     fn clear_canvas(&mut self) -> io::Result<()>;
     fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()>;
@@ -341,6 +348,13 @@ struct StdTerminal<'a> {
     prev_canvas_height: u16,
     prev_size_on_write: Option<(u16, u16)>,
     size: Option<(u16, u16)>,
+    /// Whether the physical cursor is currently shown (via a cursor declaration).
+    cursor_visible: bool,
+    /// In inline mode, how many rows above the canvas-bottom baseline the cursor was
+    /// moved by the last cursor declaration. The row-diff logic in `write_canvas` and
+    /// `clear_canvas` assumes the cursor sits on the canvas's last row, so this
+    /// displacement must be undone (see `restore_cursor_baseline`) before either runs.
+    cursor_displacement_rows: u16,
     #[cfg(unix)]
     resume_signal: Option<ResumeSignalListener>,
 }
@@ -427,7 +441,45 @@ impl TerminalImpl for StdTerminal<'_> {
         self.raw_mode_enabled
     }
 
+    fn position_cursor(&mut self, declaration: Option<(u16, u16)>) -> io::Result<()> {
+        match declaration {
+            Some((x, y)) => {
+                if self.fullscreen {
+                    // Absolute positioning relative to the canvas's top row.
+                    self.dest
+                        .queue(cursor::MoveTo(x, self.prev_canvas_top_row + y))?;
+                } else {
+                    // Inline mode: the cursor currently sits on the canvas's last row
+                    // (write_canvas's contract). Move up to the target row, then to the
+                    // target column, and remember the displacement so the baseline can
+                    // be restored before the next write/clear.
+                    self.restore_cursor_baseline()?;
+                    let last_row = self.prev_canvas_height.saturating_sub(1);
+                    let rows_up = last_row.saturating_sub(y);
+                    if rows_up > 0 {
+                        self.dest.queue(cursor::MoveToPreviousLine(rows_up))?;
+                    }
+                    self.dest.queue(cursor::MoveToColumn(x))?;
+                    self.cursor_displacement_rows = rows_up;
+                }
+                if !self.cursor_visible {
+                    self.dest.queue(cursor::Show)?;
+                    self.cursor_visible = true;
+                }
+            }
+            None => {
+                if self.cursor_visible {
+                    self.dest.queue(cursor::Hide)?;
+                    self.cursor_visible = false;
+                }
+            }
+        }
+        self.dest.flush()?;
+        Ok(())
+    }
+
     fn clear_canvas(&mut self) -> io::Result<()> {
+        self.restore_cursor_baseline()?;
         if self.prev_canvas_height == 0 {
             return Ok(());
         }
@@ -455,6 +507,7 @@ impl TerminalImpl for StdTerminal<'_> {
     }
 
     fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()> {
+        self.restore_cursor_baseline()?;
         let Some(prev) = prev else {
             // No previous canvas: full write.
             if self.fullscreen {
@@ -644,6 +697,8 @@ impl<'a> StdTerminal<'a> {
             prev_canvas_height: 0,
             size: None,
             prev_size_on_write: None,
+            cursor_visible: false,
+            cursor_displacement_rows: 0,
             // Best-effort: if signal registration fails, the terminal still works —
             // it just won't self-heal after suspend/resume.
             #[cfg(unix)]
@@ -655,6 +710,18 @@ impl<'a> StdTerminal<'a> {
         }
         register_terminal_for_panic_restore(fullscreen);
         Ok(term)
+    }
+
+    /// Undoes any cursor displacement left behind by a cursor declaration, returning
+    /// the cursor to the canvas's last row. The inline row-diff logic relies on the
+    /// cursor sitting there at the start of every write/clear.
+    fn restore_cursor_baseline(&mut self) -> io::Result<()> {
+        if self.cursor_displacement_rows > 0 {
+            self.dest
+                .queue(cursor::MoveToNextLine(self.cursor_displacement_rows))?;
+            self.cursor_displacement_rows = 0;
+        }
+        Ok(())
     }
 
     fn set_raw_mode_enabled(&mut self, raw_mode_enabled: bool) -> io::Result<()> {
@@ -692,6 +759,7 @@ impl<'a> StdTerminal<'a> {
 
 impl Drop for StdTerminal<'_> {
     fn drop(&mut self) {
+        let _ = self.restore_cursor_baseline();
         let _ = self.set_raw_mode_enabled(false);
         if self.fullscreen {
             let _ = self.dest.queue(terminal::LeaveAlternateScreen);
@@ -865,6 +933,12 @@ impl<'a> Terminal<'a> {
 
     pub fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()> {
         self.inner.write_canvas(prev, canvas)
+    }
+
+    /// Moves the physical cursor to a declared canvas position (and shows it), or hides
+    /// it when there is no declaration. See [`Canvas::declare_cursor`].
+    pub fn position_cursor(&mut self, declaration: Option<(u16, u16)>) -> io::Result<()> {
+        self.inner.position_cursor(declaration)
     }
 
     pub fn received_ctrl_c(&self) -> bool {
@@ -1270,6 +1344,8 @@ mod tests {
             prev_canvas_height,
             size: None,
             prev_size_on_write: None,
+            cursor_visible: false,
+            cursor_displacement_rows: 0,
             #[cfg(unix)]
             resume_signal: None,
         }
@@ -1296,6 +1372,8 @@ mod tests {
             prev_canvas_height,
             size: Some(term_size),
             prev_size_on_write: None,
+            cursor_visible: false,
+            cursor_displacement_rows: 0,
             #[cfg(unix)]
             resume_signal: None,
         }
@@ -1316,6 +1394,70 @@ mod tests {
         let mut vt = avt::Vt::new(term_size.0 as _, term_size.1 as _);
         vt.feed_str(&String::from_utf8(setup).unwrap());
         (diff, vt)
+    }
+
+    /// Inline-mode cursor positioning: moving the cursor up to the declared row must be
+    /// undone (baseline restore) before the next canvas write, so the row-diff logic's
+    /// "cursor sits on the last row" assumption holds.
+    #[test]
+    fn test_position_cursor_inline_displacement_and_baseline_restore() {
+        let (dest, buf) = new_test_writer();
+        let mut term = new_inline_term(dest, 3); // canvas height 3, last row = 2
+
+        // Declare a cursor at (4, 0): two rows above the baseline.
+        term.position_cursor(Some((4, 0))).unwrap();
+        assert_eq!(term.cursor_displacement_rows, 2);
+        assert!(term.cursor_visible);
+        let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("\x1b[2F"),
+            "expected MoveToPreviousLine(2): {output:?}"
+        );
+        assert!(
+            output.contains("\x1b[5G"),
+            "expected MoveToColumn(4) (1-based CSI G): {output:?}"
+        );
+        assert!(
+            output.contains("\x1b[?25h"),
+            "expected cursor Show: {output:?}"
+        );
+
+        // Hiding the cursor leaves the displacement for the next write to restore.
+        buf.lock().unwrap().clear();
+        term.position_cursor(None).unwrap();
+        assert!(!term.cursor_visible);
+        let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("\x1b[?25l"),
+            "expected cursor Hide: {output:?}"
+        );
+
+        // The next baseline restore moves back down by the displacement.
+        buf.lock().unwrap().clear();
+        term.restore_cursor_baseline().unwrap();
+        assert_eq!(term.cursor_displacement_rows, 0);
+        term.dest.flush().unwrap();
+        let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("\x1b[2E"),
+            "expected MoveToNextLine(2): {output:?}"
+        );
+    }
+
+    /// Fullscreen-mode cursor positioning uses absolute coordinates and leaves no
+    /// displacement to restore.
+    #[test]
+    fn test_position_cursor_fullscreen_absolute() {
+        let (dest, buf) = new_test_writer();
+        let mut term = new_fullscreen_term(dest, 5, 3); // top row 5
+        term.position_cursor(Some((2, 1))).unwrap();
+        assert_eq!(term.cursor_displacement_rows, 0);
+        let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        // MoveTo is 1-based in CSI: row 5+1+1=7, col 2+1=3.
+        assert!(
+            output.contains("\x1b[7;3H"),
+            "expected absolute MoveTo: {output:?}"
+        );
     }
 
     /// The panic-restore registry must track live terminals and reset the fullscreen
