@@ -85,6 +85,14 @@ pub enum TerminalEvent {
     FullscreenMouse(FullscreenMouseEvent),
     /// A resize event, fired when the terminal is resized.
     Resize(u16, u16),
+    /// A paste event, fired when the user pastes text while bracketed paste mode is active.
+    ///
+    /// The entire pasted text is delivered as a single event rather than a series of key
+    /// events, allowing components such as
+    /// [`TextInput`](crate::components::TextInput) to process the paste in one pass (one
+    /// `on_change` invocation, one render) and applications to distinguish typed input
+    /// from pasted input.
+    Paste(String),
 }
 
 struct TerminalEventsInner {
@@ -377,6 +385,7 @@ impl TerminalImpl for StdTerminal<'_> {
                         }))
                     }
                     Ok(Event::Resize(width, height)) => Some(TerminalEvent::Resize(width, height)),
+                    Ok(Event::Paste(text)) => Some(TerminalEvent::Paste(text)),
                     _ => None,
                 }
             })
@@ -431,9 +440,14 @@ impl<'a> StdTerminal<'a> {
                 if self.mouse_capture {
                     self.dest.execute(event::EnableMouseCapture)?;
                 }
+                // Bracketed paste makes terminals deliver pasted text as a single
+                // Event::Paste instead of a burst of key events. Terminals that don't
+                // support it simply ignore the sequence.
+                self.dest.execute(event::EnableBracketedPaste)?;
                 terminal::enable_raw_mode()?;
             } else {
                 terminal::disable_raw_mode()?;
+                self.dest.execute(event::DisableBracketedPaste)?;
                 if self.mouse_capture {
                     self.dest.execute(event::DisableMouseCapture)?;
                 }
