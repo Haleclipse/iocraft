@@ -178,8 +178,8 @@ impl Component for ScrollViewScrollbar {
 
         updater.set_layout_style(taffy::style::Style {
             size: taffy::geometry::Size {
-                width: taffy::style::Dimension::Length(1.0),
-                height: taffy::style::Dimension::Percent(1.0),
+                width: taffy::style::Dimension::length(1.0),
+                height: taffy::style::Dimension::percent(1.0),
             },
             ..Default::default()
         });

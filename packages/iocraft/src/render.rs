@@ -344,7 +344,42 @@ pub(crate) struct LayoutEngineNodeContext {
     measure_func: Option<MeasureFunc>,
 }
 
-pub(crate) type LayoutEngine = TaffyTree<LayoutEngineNodeContext>;
+/// Newtype around [`TaffyTree`] that restores `Send`.
+///
+/// SAFETY: `TaffyTree` lost its `Send` implementation in taffy 0.8, solely because the
+/// `calc()` feature stores type-erased `*const ()` handles inside style values
+/// (`CompactLength`'s tagged-pointer representation). iocraft never constructs `calc()`
+/// values — `TaffyTree`'s high-level API offers no way to do so, and every style we set
+/// comes from `LayoutStyle`, which only produces `length`/`percent`/`auto` variants.
+/// Therefore no actual pointer is ever stored, let alone dereferenced across threads.
+///
+/// This approach was endorsed by the taffy maintainer in
+/// <https://github.com/ccbrown/iocraft/issues/119>. If iocraft ever exposes `calc()`,
+/// this impl must be replaced with the generic-`Calc` mechanism tracked in
+/// <https://github.com/DioxusLabs/taffy/pull/855>.
+pub(crate) struct LayoutEngine(TaffyTree<LayoutEngineNodeContext>);
+
+unsafe impl Send for LayoutEngine {}
+
+impl LayoutEngine {
+    pub fn new() -> Self {
+        Self(TaffyTree::new())
+    }
+}
+
+impl std::ops::Deref for LayoutEngine {
+    type Target = TaffyTree<LayoutEngineNodeContext>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for LayoutEngine {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 struct Tree<'a> {
     layout_engine: LayoutEngine,
@@ -361,7 +396,7 @@ struct RenderOutput {
 
 impl<'a> Tree<'a> {
     fn new(mut props: AnyProps<'a>, helper: Box<dyn ComponentHelperExt>) -> Self {
-        let mut layout_engine = TaffyTree::new();
+        let mut layout_engine = LayoutEngine::new();
         let root_node_id = layout_engine
             .new_leaf_with_context(Style::default(), LayoutEngineNodeContext::default())
             .expect("we should be able to add the root");

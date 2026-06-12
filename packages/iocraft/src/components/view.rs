@@ -203,22 +203,22 @@ impl Component for View {
             Rect::zero()
         } else {
             Rect {
-                top: LengthPercentage::Length(if self.border_edges.contains(Edges::Top) {
+                top: LengthPercentage::length(if self.border_edges.contains(Edges::Top) {
                     1.0
                 } else {
                     0.0
                 }),
-                bottom: LengthPercentage::Length(if self.border_edges.contains(Edges::Bottom) {
+                bottom: LengthPercentage::length(if self.border_edges.contains(Edges::Bottom) {
                     1.0
                 } else {
                     0.0
                 }),
-                left: LengthPercentage::Length(if self.border_edges.contains(Edges::Left) {
+                left: LengthPercentage::length(if self.border_edges.contains(Edges::Left) {
                     1.0
                 } else {
                     0.0
                 }),
-                right: LengthPercentage::Length(if self.border_edges.contains(Edges::Right) {
+                right: LengthPercentage::length(if self.border_edges.contains(Edges::Right) {
                     1.0
                 } else {
                     0.0

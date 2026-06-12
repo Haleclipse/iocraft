@@ -79,9 +79,9 @@ macro_rules! new_length_percentage_type {
         impl From<$name> for LengthPercentage {
             fn from(p: $name) -> Self {
                 match p {
-                    $name::Unset => LengthPercentage::Length(0.0),
-                    $name::Length(l) => LengthPercentage::Length(l as _),
-                    $name::Percent(p) => LengthPercentage::Percent(p / 100.0),
+                    $name::Unset => LengthPercentage::length(0.0),
+                    $name::Length(l) => LengthPercentage::length(l as _),
+                    $name::Percent(p) => LengthPercentage::percent(p / 100.0),
                 }
             }
         }
@@ -135,9 +135,9 @@ macro_rules! new_size_type {
             fn from(p: $name) -> Self {
                 match p {
                     $name::Unset => $def.into(),
-                    $name::Auto => LengthPercentageAuto::Auto,
-                    $name::Length(l) => LengthPercentageAuto::Length(l as _),
-                    $name::Percent(p) => LengthPercentageAuto::Percent(p / 100.0),
+                    $name::Auto => LengthPercentageAuto::auto(),
+                    $name::Length(l) => LengthPercentageAuto::length(l as _),
+                    $name::Percent(p) => LengthPercentageAuto::percent(p / 100.0),
                 }
             }
         }
@@ -146,9 +146,9 @@ macro_rules! new_size_type {
             fn from(p: $name) -> Self {
                 match p {
                     $name::Unset => $def.into(),
-                    $name::Auto => Dimension::Auto,
-                    $name::Length(l) => Dimension::Length(l as _),
-                    $name::Percent(p) => Dimension::Percent(p / 100.0),
+                    $name::Auto => Dimension::auto(),
+                    $name::Length(l) => Dimension::length(l as _),
+                    $name::Percent(p) => Dimension::percent(p / 100.0),
                 }
             }
         }
@@ -200,9 +200,9 @@ pub enum FlexBasis {
 impl From<FlexBasis> for Dimension {
     fn from(b: FlexBasis) -> Self {
         match b {
-            FlexBasis::Auto => Dimension::Auto,
-            FlexBasis::Length(l) => Dimension::Length(l as _),
-            FlexBasis::Percent(p) => Dimension::Percent(p / 100.0),
+            FlexBasis::Auto => Dimension::auto(),
+            FlexBasis::Length(l) => Dimension::length(l as _),
+            FlexBasis::Percent(p) => Dimension::percent(p / 100.0),
         }
     }
 }
