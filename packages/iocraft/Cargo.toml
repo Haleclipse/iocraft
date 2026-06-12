@@ -13,7 +13,7 @@ unstable-output-streams = []
 [dependencies]
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 futures = "0.3.30"
-taffy = { version = "0.5.2", default-features = false, features = ["std", "flexbox", "taffy_tree"] }
+taffy = { version = "0.10.0", default-features = false, features = ["std", "flexbox", "grid", "taffy_tree"] }
 iocraft-macros = { version = "0.2.4", path = "../iocraft-macros" }
 bitflags = "2.6.0"
 unicode-width = "0.1.13"
