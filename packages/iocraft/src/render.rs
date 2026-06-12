@@ -548,6 +548,11 @@ impl<'a> Tree<'a> {
                     mouse_capture_enabled = Some(requested);
                 }
             }
+            if let Some(flags) = self.system_context.keyboard_enhancement_flags() {
+                // Change-detection happens inside the terminal; repeated calls with
+                // the same flags are no-ops.
+                term.set_keyboard_enhancement_flags(flags)?;
+            }
             if self.system_context.should_exit() || term.received_ctrl_c() {
                 break;
             }

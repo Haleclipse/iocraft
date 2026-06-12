@@ -8,6 +8,7 @@ use core::{
 pub struct SystemContext {
     should_exit: bool,
     mouse_capture: Option<bool>,
+    keyboard_enhancement_flags: Option<crate::KeyboardEnhancementFlags>,
 }
 
 impl SystemContext {
@@ -15,6 +16,7 @@ impl SystemContext {
         Self {
             should_exit: false,
             mouse_capture: None,
+            keyboard_enhancement_flags: None,
         }
     }
 
@@ -36,6 +38,22 @@ impl SystemContext {
 
     pub(crate) fn mouse_capture(&self) -> Option<bool> {
         self.mouse_capture
+    }
+
+    /// Requests a specific set of keyboard enhancement (kitty protocol) flags from the
+    /// terminal, replacing the default of
+    /// [`KeyboardEnhancementFlags::REPORT_EVENT_TYPES`](crate::KeyboardEnhancementFlags::REPORT_EVENT_TYPES).
+    ///
+    /// For example, adding `DISAMBIGUATE_ESCAPE_CODES` lets supporting terminals
+    /// distinguish key combinations that are conflated in the legacy protocol (such as
+    /// `Ctrl+I` vs `Tab`, or `Esc` vs escape sequences). The flags are applied after
+    /// the current render pass; terminals without kitty protocol support ignore them.
+    pub fn set_keyboard_enhancement_flags(&mut self, flags: crate::KeyboardEnhancementFlags) {
+        self.keyboard_enhancement_flags = Some(flags);
+    }
+
+    pub(crate) fn keyboard_enhancement_flags(&self) -> Option<crate::KeyboardEnhancementFlags> {
+        self.keyboard_enhancement_flags
     }
 }
 
