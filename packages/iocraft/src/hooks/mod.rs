@@ -52,6 +52,8 @@ mod use_focus;
 pub use use_focus::*;
 mod use_future;
 pub use use_future::*;
+mod use_keybinding;
+pub use use_keybinding::*;
 mod use_memo;
 pub use use_memo::*;
 mod use_output;
