@@ -18,7 +18,9 @@ use std::{
 };
 
 // Re-exports for basic types.
-pub use crossterm::event::{KeyCode, KeyEventKind, KeyEventState, KeyModifiers, MouseEventKind};
+pub use crossterm::event::{
+    KeyCode, KeyEventKind, KeyEventState, KeyModifiers, KeyboardEnhancementFlags, MouseEventKind,
+};
 
 /// An event fired when a key is pressed.
 #[non_exhaustive]
@@ -192,6 +194,17 @@ trait TerminalImpl: Write + Send {
         None
     }
     fn set_mouse_capture(&mut self, _enabled: bool) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Replaces the keyboard enhancement (kitty protocol) flags requested from the
+    /// terminal. If enhancement is already active, the old flags are popped and the
+    /// new ones pushed immediately; otherwise the new flags take effect the next time
+    /// raw mode is enabled.
+    fn set_keyboard_enhancement_flags(
+        &mut self,
+        _flags: event::KeyboardEnhancementFlags,
+    ) -> io::Result<()> {
         Ok(())
     }
 
@@ -407,6 +420,7 @@ struct StdTerminal<'a> {
     mouse_capture: bool,
     raw_mode_enabled: bool,
     enabled_keyboard_enhancement: bool,
+    keyboard_enhancement_flags: event::KeyboardEnhancementFlags,
     prev_canvas_top_row: u16,
     prev_canvas_height: u16,
     prev_size_on_write: Option<(u16, u16)>,
@@ -455,6 +469,22 @@ impl TerminalImpl for StdTerminal<'_> {
         Ok(())
     }
 
+    fn set_keyboard_enhancement_flags(
+        &mut self,
+        flags: event::KeyboardEnhancementFlags,
+    ) -> io::Result<()> {
+        if self.keyboard_enhancement_flags != flags {
+            self.keyboard_enhancement_flags = flags;
+            if self.enabled_keyboard_enhancement {
+                // Swap the active flags in place.
+                self.dest.execute(event::PopKeyboardEnhancementFlags)?;
+                self.dest
+                    .execute(event::PushKeyboardEnhancementFlags(flags))?;
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     fn poll_resumed(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         match &self.resume_signal {
@@ -478,7 +508,7 @@ impl TerminalImpl for StdTerminal<'_> {
             terminal::enable_raw_mode()?;
             if self.enabled_keyboard_enhancement {
                 self.dest.execute(event::PushKeyboardEnhancementFlags(
-                    event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+                    self.keyboard_enhancement_flags,
                 ))?;
             }
             if self.mouse_capture {
@@ -756,6 +786,7 @@ impl<'a> StdTerminal<'a> {
             mouse_capture,
             raw_mode_enabled: false,
             enabled_keyboard_enhancement: false,
+            keyboard_enhancement_flags: event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
             prev_canvas_top_row: 0,
             prev_canvas_height: 0,
             size: None,
@@ -792,7 +823,7 @@ impl<'a> StdTerminal<'a> {
             if raw_mode_enabled {
                 if terminal::supports_keyboard_enhancement().unwrap_or(false) {
                     self.dest.execute(event::PushKeyboardEnhancementFlags(
-                        event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+                        self.keyboard_enhancement_flags,
                     ))?;
                     self.enabled_keyboard_enhancement = true;
                 }
@@ -972,6 +1003,13 @@ impl<'a> Terminal<'a> {
 
     pub fn disable_mouse_capture(&mut self) -> io::Result<()> {
         self.inner.set_mouse_capture(false)
+    }
+
+    pub fn set_keyboard_enhancement_flags(
+        &mut self,
+        flags: event::KeyboardEnhancementFlags,
+    ) -> io::Result<()> {
+        self.inner.set_keyboard_enhancement_flags(flags)
     }
 
     pub fn ignore_ctrl_c(&mut self) {
@@ -1408,6 +1446,7 @@ mod tests {
             mouse_capture: false,
             raw_mode_enabled: false,
             enabled_keyboard_enhancement: false,
+            keyboard_enhancement_flags: event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
             prev_canvas_top_row,
             prev_canvas_height,
             size: None,
@@ -1436,6 +1475,7 @@ mod tests {
             mouse_capture: false,
             raw_mode_enabled: false,
             enabled_keyboard_enhancement: false,
+            keyboard_enhancement_flags: event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
             prev_canvas_top_row: 0,
             prev_canvas_height,
             size: Some(term_size),
@@ -1526,6 +1566,40 @@ mod tests {
             output.contains("\x1b[7;3H"),
             "expected absolute MoveTo: {output:?}"
         );
+    }
+
+    /// Changing keyboard enhancement flags while enhancement is active must swap the
+    /// flags in place (pop + push); while inactive it must only update the stored value.
+    #[test]
+    fn test_set_keyboard_enhancement_flags() {
+        let (dest, buf) = new_test_writer();
+        let mut term = new_inline_term(dest, 0);
+
+        // Inactive: no escape output, but the new flags are stored.
+        let flags = event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            | event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
+        term.set_keyboard_enhancement_flags(flags).unwrap();
+        assert_eq!(term.keyboard_enhancement_flags, flags);
+        assert!(buf.lock().unwrap().is_empty(), "no output while inactive");
+
+        // Active: swapping flags emits pop + push.
+        term.enabled_keyboard_enhancement = true;
+        let new_flags = event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
+        term.set_keyboard_enhancement_flags(new_flags).unwrap();
+        let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("\x1b[<1u"),
+            "expected pop sequence: {output:?}"
+        );
+        assert!(
+            output.contains("\x1b[>2u"),
+            "expected push of REPORT_EVENT_TYPES: {output:?}"
+        );
+
+        // Setting identical flags is a no-op.
+        buf.lock().unwrap().clear();
+        term.set_keyboard_enhancement_flags(new_flags).unwrap();
+        assert!(buf.lock().unwrap().is_empty(), "same flags must be a no-op");
     }
 
     /// The panic-restore registry must track live terminals and reset the fullscreen
