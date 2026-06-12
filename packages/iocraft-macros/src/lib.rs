@@ -872,6 +872,62 @@ pub fn with_layout_style_props(_attr: TokenStream, item: TokenStream) -> TokenSt
             /// See [the MDN documentation for overflow](https://developer.mozilla.org/en-US/docs/Web/CSS/overflow).
             pub overflow_y: Option<::iocraft::Overflow>
         },
+        quote! {
+            /// Defines the column tracks of a grid container, e.g. `"12 1fr auto"`.
+            /// Bare numbers are terminal cells. Requires `display: Display::Grid`.
+            ///
+            /// See [the MDN documentation for grid-template-columns](https://developer.mozilla.org/en-US/docs/Web/CSS/grid-template-columns).
+            pub grid_template_columns: ::iocraft::GridTemplate
+        },
+        quote! {
+            /// Defines the row tracks of a grid container, e.g. `"1 1fr 1"`.
+            /// Bare numbers are terminal cells. Requires `display: Display::Grid`.
+            ///
+            /// See [the MDN documentation for grid-template-rows](https://developer.mozilla.org/en-US/docs/Web/CSS/grid-template-rows).
+            pub grid_template_rows: ::iocraft::GridTemplate
+        },
+        quote! {
+            /// Defines the size of implicitly created grid columns, e.g. `"1fr"`.
+            ///
+            /// See [the MDN documentation for grid-auto-columns](https://developer.mozilla.org/en-US/docs/Web/CSS/grid-auto-columns).
+            pub grid_auto_columns: ::iocraft::GridAutoTracks
+        },
+        quote! {
+            /// Defines the size of implicitly created grid rows, e.g. `"1fr"`.
+            ///
+            /// See [the MDN documentation for grid-auto-rows](https://developer.mozilla.org/en-US/docs/Web/CSS/grid-auto-rows).
+            pub grid_auto_rows: ::iocraft::GridAutoTracks
+        },
+        quote! {
+            /// Controls how auto-placed grid items flow into the grid.
+            ///
+            /// See [the MDN documentation for grid-auto-flow](https://developer.mozilla.org/en-US/docs/Web/CSS/grid-auto-flow).
+            pub grid_auto_flow: ::iocraft::GridAutoFlow
+        },
+        quote! {
+            /// Defines named grid areas using quoted rows, e.g. `r#""header header" "nav main""#.
+            ///
+            /// See [the MDN documentation for grid-template-areas](https://developer.mozilla.org/en-US/docs/Web/CSS/grid-template-areas).
+            pub grid_template_areas: ::iocraft::GridAreas
+        },
+        quote! {
+            /// Places this element in its grid container's columns, e.g. `"1 / 3"` or `"span 2"`.
+            ///
+            /// See [the MDN documentation for grid-column](https://developer.mozilla.org/en-US/docs/Web/CSS/grid-column).
+            pub grid_column: ::iocraft::GridPlacementSpec
+        },
+        quote! {
+            /// Places this element in its grid container's rows, e.g. `"2"` or `"1 / span 2"`.
+            ///
+            /// See [the MDN documentation for grid-row](https://developer.mozilla.org/en-US/docs/Web/CSS/grid-row).
+            pub grid_row: ::iocraft::GridPlacementSpec
+        },
+        quote! {
+            /// Places this element in a named grid area, e.g. `"header"`.
+            ///
+            /// See [the MDN documentation for grid-area](https://developer.mozilla.org/en-US/docs/Web/CSS/grid-area).
+            pub grid_area: ::iocraft::GridArea
+        },
     ]
     .map(|tokens| syn::Field::parse_named.parse2(tokens).unwrap());
 
@@ -885,7 +941,9 @@ pub fn with_layout_style_props(_attr: TokenStream, item: TokenStream) -> TokenSt
             let struct_name = &ast.ident;
             let field_assignments = layout_style_fields.iter().map(|field| {
                 let field_name = &field.ident;
-                quote! { ret.#field_name = self.#field_name; }
+                // `.clone()` is a no-op copy for Copy fields and required for the
+                // non-Copy grid style fields (which contain Vecs/Strings).
+                quote! { ret.#field_name = self.#field_name.clone(); }
             });
 
             let where_clause = &ast.generics.where_clause;
