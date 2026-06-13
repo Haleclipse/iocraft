@@ -1117,21 +1117,17 @@ impl<'a> Terminal<'a> {
                 let Some(event) = next else {
                     return;
                 };
-                if !self.ignore_ctrl_c {
-                    if let TerminalEvent::Key(KeyEvent {
+                let is_ctrl_c = matches!(
+                    event,
+                    TerminalEvent::Key(KeyEvent {
                         code: KeyCode::Char('c'),
                         kind: KeyEventKind::Press,
                         modifiers: KeyModifiers::CONTROL,
-                    }) = event
-                    {
-                        self.received_ctrl_c = true;
-                    }
-                    if self.received_ctrl_c {
-                        return;
-                    }
-                }
-                // All subscribers share one propagation state per event, so a consumer
-                // in a deeply-nested component can stop ancestors from acting on it.
+                        ..
+                    })
+                );
+
+                // Dispatch to all subscribers first — Ctrl+C is a normal event.
                 let shared_state = Arc::new(SharedEventState::default());
                 self.subscribers.retain(|subscriber| {
                     if let Some(subscriber) = subscriber.upgrade() {
@@ -1147,6 +1143,17 @@ impl<'a> Terminal<'a> {
                         false
                     }
                 });
+
+                // Default exit: if Ctrl+C was not consumed by any component via
+                // stop_propagation(), treat it as an exit signal. Components that
+                // want to intercept Ctrl+C (confirmation dialogs, save-before-quit)
+                // call event.stop_propagation() to suppress the default behavior.
+                if is_ctrl_c && !self.ignore_ctrl_c && !shared_state.is_propagation_stopped() {
+                    self.received_ctrl_c = true;
+                }
+                if self.received_ctrl_c {
+                    return;
+                }
             },
             None => {
                 let inner = &mut self.inner;
