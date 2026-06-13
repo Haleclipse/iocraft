@@ -83,10 +83,17 @@ impl Component for ErrorBoundary {
     ) {
         // Attempt to update the child subtree. If any child panics, we catch it
         // and display the error instead.
+        //
+        // We temporarily install a silent panic hook so the default hook doesn't
+        // print the panic message to stderr (which would corrupt the TUI output).
+        // The previous hook is restored immediately after catch_unwind returns.
         let children = std::mem::take(&mut props.children);
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
         let result = catch_unwind(AssertUnwindSafe(|| {
             updater.update_children(children, None);
         }));
+        std::panic::set_hook(prev_hook);
 
         match result {
             Ok(()) => {
