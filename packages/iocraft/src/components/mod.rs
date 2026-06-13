@@ -7,6 +7,9 @@ pub use checkbox::*;
 mod context_provider;
 pub use context_provider::*;
 
+mod error_boundary;
+pub use error_boundary::*;
+
 mod focus_scope;
 pub use focus_scope::*;
 
@@ -21,6 +24,9 @@ pub use text::*;
 
 mod scroll_view;
 pub use scroll_view::*;
+
+mod static_output;
+pub use static_output::*;
 
 mod text_input;
 pub use text_input::*;
