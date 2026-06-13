@@ -17,6 +17,7 @@ taffy = { version = "0.10.0", default-features = false, features = ["std", "flex
 iocraft-macros = { version = "0.2.4", path = "../iocraft-macros" }
 bitflags = "2.6.0"
 unicode-width = "0.1.13"
+unicode-segmentation = "1"
 generational-box = "0.5.6"
 regex = "1.12.3"
 # Runtime-agnostic timer used for render-loop frame throttling.

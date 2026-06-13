@@ -3,7 +3,7 @@ use core::{
     fmt::{self, Display},
     mem,
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 /// A `SegmentedString` is a string consisting of multiple segments, which don't have to be
 /// contiguous.
@@ -66,7 +66,7 @@ pub struct SegmentedStringLineSegment<'a> {
 impl SegmentedStringLineSegment<'_> {
     fn substring(&self, start: usize, end: usize) -> Self {
         let text = &self.text[start..end];
-        let width = text.width();
+        let width = crate::canvas::string_display_width(text);
         SegmentedStringLineSegment {
             text,
             index: self.index,
@@ -77,7 +77,7 @@ impl SegmentedStringLineSegment<'_> {
 
     fn trim_end(&mut self) {
         self.text = self.text.trim_end();
-        self.width = self.text.width();
+        self.width = crate::canvas::string_display_width(self.text);
     }
 }
 
@@ -95,7 +95,7 @@ impl<'a> SegmentedString<'a> {
         end: usize,
     ) -> SegmentedStringLineSegment<'_> {
         let text = self.segments[index][offset..end].trim_end_matches('\n');
-        let width = text.width();
+        let width = crate::canvas::string_display_width(text);
         SegmentedStringLineSegment {
             text,
             index,
@@ -199,7 +199,9 @@ impl<'a> SegmentedString<'a> {
                         .last()
                         .map(|(i, _)| i)
                         .unwrap_or(segment.text.len());
-                    let trailing_whitespace_width = segment.text[trailing_whitespace_idx..].width();
+                    let trailing_whitespace_width = crate::canvas::string_display_width(
+                        &segment.text[trailing_whitespace_idx..],
+                    );
 
                     if current_line.width + (segment.width - trailing_whitespace_width) > width {
                         // This segment is too wide, we need to forcefully break it
