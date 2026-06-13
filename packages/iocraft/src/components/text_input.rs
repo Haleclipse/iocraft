@@ -27,6 +27,9 @@ struct CursorOverlayState {
     row: u16,
     char_width: u16,
     active: bool,
+    cursor_color: Option<Color>,
+    cursor_background_color: Option<Color>,
+    physical_cursor: bool,
 }
 
 impl Hook for CursorOverlayState {
@@ -34,20 +37,27 @@ impl Hook for CursorOverlayState {
         if !self.active {
             return;
         }
-        // Cursor rendering is pure style inversion (SGR Reverse), which lets the
-        // terminal's own theme determine the contrasted foreground/background pair.
-        let overlay = StyleOverlay {
-            invert: Some(true),
-            ..Default::default()
-        };
-        let mut canvas = drawer.canvas();
-        for offset in 0..self.char_width {
-            canvas.set_overlay((self.col + offset) as isize, self.row as isize, overlay);
+        if !self.physical_cursor {
+            let overlay = if self.cursor_color.is_some() || self.cursor_background_color.is_some() {
+                StyleOverlay {
+                    color: self.cursor_color.map(Some),
+                    background_color: self.cursor_background_color.map(Some),
+                    ..Default::default()
+                }
+            } else {
+                StyleOverlay {
+                    invert: Some(true),
+                    ..Default::default()
+                }
+            };
+            let mut canvas = drawer.canvas();
+            for offset in 0..self.char_width {
+                canvas.set_overlay((self.col + offset) as isize, self.row as isize, overlay);
+            }
         }
-        // Also anchor the physical terminal cursor here so the operating system's IME
-        // pre-edit window (and screen readers) follow the caret. The inverted overlay
-        // remains the visible cursor; the physical cursor is what input methods track.
-        canvas.declare_cursor(self.col as isize, self.row as isize);
+        drawer
+            .canvas()
+            .declare_cursor(self.col as isize, self.row as isize, self.physical_cursor);
     }
 }
 
@@ -134,6 +144,26 @@ pub struct TextInputProps {
 
     /// An optional handle which can be used for imperative control of the input.
     pub handle: Option<Ref<TextInputHandle>>,
+
+    /// Explicit foreground color for the cursor block. When set (with or without
+    /// `cursor_background_color`), the cursor uses these explicit colors instead of
+    /// SGR Reverse inversion. This guarantees contrast on any terminal theme.
+    /// Only effective when `physical_cursor` is false (the default).
+    pub cursor_color: Option<Color>,
+
+    /// Explicit background color for the cursor block.
+    /// Only effective when `physical_cursor` is false (the default).
+    pub cursor_background_color: Option<Color>,
+
+    /// When `true`, uses the terminal's native block cursor (**ratatui model**) instead
+    /// of rendering the cursor via [`StyleOverlay`] (**ink model**, the default).
+    ///
+    /// - **ratatui model** (`true`): the terminal guarantees cursor contrast and
+    ///   respects the user's cursor shape/color preferences. `cursor_color` /
+    ///   `cursor_background_color` are ignored.
+    /// - **ink model** (`false`, default): the cursor is rendered as an inverted or
+    ///   explicitly colored cell. The physical cursor is positioned for IME but hidden.
+    pub physical_cursor: bool,
 }
 
 trait UseSize<'a> {
@@ -460,6 +490,9 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
     cursor_overlay.active = has_focus;
     cursor_overlay.col = cursor_col.saturating_sub(scroll_offset_col.get());
     cursor_overlay.row = cursor_row.saturating_sub(scroll_offset_row.get());
+    cursor_overlay.cursor_color = props.cursor_color;
+    cursor_overlay.cursor_background_color = props.cursor_background_color;
+    cursor_overlay.physical_cursor = props.physical_cursor;
     cursor_overlay.char_width = if has_focus && cursor_offset.get() < props.value.len() {
         props.value[cursor_offset.get()..]
             .chars()
@@ -729,6 +762,7 @@ mod tests {
         width: Size,
         height: Size,
         multiline: bool,
+        physical_cursor: bool,
     }
 
     #[component]
@@ -751,6 +785,7 @@ mod tests {
                     value: props.initial_value.clone(),
                     on_change: |_| {},
                     multiline: props.multiline,
+                    physical_cursor: props.physical_cursor,
                 )
             }
         }
@@ -791,12 +826,18 @@ mod tests {
             )))
             .collect::<Vec<_>>()
             .await;
+        use crate::canvas::CursorDeclaration;
+        let cd = |x, y| CursorDeclaration {
+            x,
+            y,
+            visible: false,
+        };
         // Initial frame: empty value, caret at the input's origin. MyComponent has
         // padding_left: 1, so the input's canvas-absolute origin is column 1.
-        assert_eq!(canvases[0].cursor_declaration(), Some((1, 0)));
+        assert_eq!(canvases[0].cursor_declaration(), Some(cd(1, 0)));
         // After typing "f" then "!", the caret has advanced past the typed text.
         let last = canvases.last().unwrap();
-        assert_eq!(last.cursor_declaration(), Some((3, 0)));
+        assert_eq!(last.cursor_declaration(), Some(cd(3, 0)));
     }
 
     #[apply(test!)]
@@ -945,6 +986,35 @@ mod tests {
         assert_eq!(
             style.color, None,
             "default cursor should not force white fg"
+        );
+    }
+
+    #[apply(test!)]
+    async fn test_physical_cursor_mode_no_overlay_but_visible_declaration() {
+        use crate::canvas::CursorDeclaration;
+        let canvases: Vec<_> = element! {
+            CursorProbe(initial_value: "".to_string(), width: 3, height: 1, physical_cursor: true)
+        }
+        .mock_terminal_render_loop(MockTerminalConfig::with_events(stream::iter(vec![
+            TerminalEvent::Resize(80, 24),
+        ])))
+        .collect()
+        .await;
+
+        let first = &canvases[0];
+        assert_eq!(
+            first.resolved_text_style(0, 0),
+            None,
+            "physical_cursor mode should NOT apply any overlay"
+        );
+        assert_eq!(
+            first.cursor_declaration(),
+            Some(CursorDeclaration {
+                x: 0,
+                y: 0,
+                visible: true,
+            }),
+            "physical_cursor mode should declare visible cursor"
         );
     }
 

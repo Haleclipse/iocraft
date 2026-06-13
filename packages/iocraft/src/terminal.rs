@@ -229,10 +229,13 @@ trait TerminalImpl: Write + Send {
         Ok(())
     }
 
-    /// Moves the physical terminal cursor to the given canvas position and shows it, or
-    /// hides it when `declaration` is `None`. Called after each canvas write so IMEs and
-    /// screen readers can anchor to the caret of a focused text input.
-    fn position_cursor(&mut self, _declaration: Option<(u16, u16)>) -> io::Result<()> {
+    /// Positions the physical terminal cursor. When `visible` is true (ratatui model),
+    /// the cursor is shown; when false (ink model), it is positioned for IME only.
+    /// Called after each canvas write.
+    fn position_cursor(
+        &mut self,
+        _declaration: Option<crate::canvas::CursorDeclaration>,
+    ) -> io::Result<()> {
         Ok(())
     }
 
@@ -534,18 +537,17 @@ impl TerminalImpl for StdTerminal<'_> {
         self.raw_mode_enabled
     }
 
-    fn position_cursor(&mut self, declaration: Option<(u16, u16)>) -> io::Result<()> {
+    fn position_cursor(
+        &mut self,
+        declaration: Option<crate::canvas::CursorDeclaration>,
+    ) -> io::Result<()> {
         match declaration {
-            Some((x, y)) => {
+            Some(decl) => {
+                let (x, y) = (decl.x as u16, decl.y as u16);
                 if self.fullscreen {
-                    // Absolute positioning relative to the canvas's top row.
                     self.dest
                         .queue(cursor::MoveTo(x, self.prev_canvas_top_row + y))?;
                 } else {
-                    // Inline mode: the cursor currently sits on the canvas's last row
-                    // (write_canvas's contract). Move up to the target row, then to the
-                    // target column, and remember the displacement so the baseline can
-                    // be restored before the next write/clear.
                     self.restore_cursor_baseline()?;
                     let last_row = self.prev_canvas_height.saturating_sub(1);
                     let rows_up = last_row.saturating_sub(y);
@@ -555,14 +557,13 @@ impl TerminalImpl for StdTerminal<'_> {
                     self.dest.queue(cursor::MoveToColumn(x))?;
                     self.cursor_displacement_rows = rows_up;
                 }
-                if !self.cursor_visible {
-                    // Use SteadyBlock to avoid blinking — the visual cursor
-                    // is rendered via style overlay (SGR Reverse), and a
-                    // blinking physical cursor on top creates visual noise.
-                    // Maps to: CC codex-rs/tui tui.rs SetCursorStyle::SteadyBlock
-                    let _ = self.dest.queue(cursor::SetCursorStyle::SteadyBlock);
+                if decl.visible && !self.cursor_visible {
+                    self.dest.queue(cursor::SetCursorStyle::SteadyBlock)?;
                     self.dest.queue(cursor::Show)?;
                     self.cursor_visible = true;
+                } else if !decl.visible && self.cursor_visible {
+                    self.dest.queue(cursor::Hide)?;
+                    self.cursor_visible = false;
                 }
             }
             None => {
@@ -865,8 +866,6 @@ impl Drop for StdTerminal<'_> {
         } else if self.prev_canvas_height > 0 {
             let _ = self.dest.write_all(b"\r\n");
         }
-        // Restore default cursor style before showing — undo the SteadyBlock
-        // set during rendering so the user's shell gets its preferred style back.
         let _ = self.dest.queue(cursor::SetCursorStyle::DefaultUserShape);
         let _ = self.dest.execute(cursor::Show);
         unregister_terminal_for_panic_restore();
@@ -1044,9 +1043,12 @@ impl<'a> Terminal<'a> {
         self.inner.write_canvas(prev, canvas)
     }
 
-    /// Moves the physical cursor to a declared canvas position (and shows it), or hides
-    /// it when there is no declaration. See [`Canvas::declare_cursor`].
-    pub fn position_cursor(&mut self, declaration: Option<(u16, u16)>) -> io::Result<()> {
+    /// Positions the physical cursor per the declaration's visibility flag.
+    /// See [`Canvas::declare_cursor`].
+    pub fn position_cursor(
+        &mut self,
+        declaration: Option<crate::canvas::CursorDeclaration>,
+    ) -> io::Result<()> {
         self.inner.position_cursor(declaration)
     }
 
@@ -1520,10 +1522,17 @@ mod tests {
         let (dest, buf) = new_test_writer();
         let mut term = new_inline_term(dest, 3); // canvas height 3, last row = 2
 
-        // Declare a cursor at (4, 0): two rows above the baseline.
-        term.position_cursor(Some((4, 0))).unwrap();
+        use crate::canvas::CursorDeclaration;
+
+        // ink model: visible=false, physical cursor stays hidden — only positioned for IME.
+        term.position_cursor(Some(CursorDeclaration {
+            x: 4,
+            y: 0,
+            visible: false,
+        }))
+        .unwrap();
         assert_eq!(term.cursor_displacement_rows, 2);
-        assert!(term.cursor_visible);
+        assert!(!term.cursor_visible);
         let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         assert!(
             output.contains("\x1b[2F"),
@@ -1534,19 +1543,14 @@ mod tests {
             "expected MoveToColumn(4) (1-based CSI G): {output:?}"
         );
         assert!(
-            output.contains("\x1b[?25h"),
-            "expected cursor Show: {output:?}"
+            !output.contains("\x1b[?25h"),
+            "physical cursor should NOT be shown: {output:?}"
         );
 
-        // Hiding the cursor leaves the displacement for the next write to restore.
+        // position_cursor(None) is a no-op when cursor was never shown.
         buf.lock().unwrap().clear();
         term.position_cursor(None).unwrap();
         assert!(!term.cursor_visible);
-        let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
-        assert!(
-            output.contains("\x1b[?25l"),
-            "expected cursor Hide: {output:?}"
-        );
 
         // The next baseline restore moves back down by the displacement.
         buf.lock().unwrap().clear();
@@ -1564,9 +1568,15 @@ mod tests {
     /// displacement to restore.
     #[test]
     fn test_position_cursor_fullscreen_absolute() {
+        use crate::canvas::CursorDeclaration;
         let (dest, buf) = new_test_writer();
         let mut term = new_fullscreen_term(dest, 5, 3); // top row 5
-        term.position_cursor(Some((2, 1))).unwrap();
+        term.position_cursor(Some(CursorDeclaration {
+            x: 2,
+            y: 1,
+            visible: false,
+        }))
+        .unwrap();
         assert_eq!(term.cursor_displacement_rows, 0);
         let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         // MoveTo is 1-based in CSI: row 5+1+1=7, col 2+1=3.

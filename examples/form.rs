@@ -6,6 +6,8 @@ struct FormFieldProps {
     value: Option<State<String>>,
     has_focus: bool,
     multiline: bool,
+    cursor_color: Option<Color>,
+    cursor_background_color: Option<Color>,
 }
 
 #[component]
@@ -33,6 +35,8 @@ fn FormField(props: &FormFieldProps) -> impl Into<AnyElement<'static>> {
                     value: value.to_string(),
                     on_change: move |new_value| value.set(new_value),
                     multiline: props.multiline,
+                    cursor_color: props.cursor_color,
+                    cursor_background_color: props.cursor_background_color,
                 )
             }
         }
@@ -95,9 +99,9 @@ fn Form<'a>(props: &mut FormProps<'a>, mut hooks: Hooks) -> impl Into<AnyElement
                     Text(content: "What's your name?", color: Color::White, weight: Weight::Bold)
                     Text(content: "Press tab to cycle through fields.", color: Color::Grey, align: TextAlign::Center)
                 }
-                FormField(label: "First Name", value: first_name, has_focus: focus == 0)
-                FormField(label: "Last Name", value: last_name, has_focus: focus == 1)
-                FormField(label: "Life Story", value: life_story, has_focus: focus == 2, multiline: true)
+                FormField(label: "First Name", value: first_name, has_focus: focus == 0, cursor_color: Color::Black, cursor_background_color: Color::White)
+                FormField(label: "Last Name", value: last_name, has_focus: focus == 1, cursor_color: Color::Black, cursor_background_color: Color::White)
+                FormField(label: "Life Story", value: life_story, has_focus: focus == 2, multiline: true, cursor_color: Color::Black, cursor_background_color: Color::White)
                 View(
                     border_style: if focus == 3 { BorderStyle::Round } else { BorderStyle::None },
                     border_color: Color::Green,
