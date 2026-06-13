@@ -273,7 +273,21 @@ pub struct Canvas {
     width: usize,
     cells: Vec<Vec<CanvasCell>>,
     overlays: Vec<Vec<Option<StyleOverlay>>>,
-    cursor_declaration: Option<(usize, usize)>,
+    cursor_declaration: Option<CursorDeclaration>,
+}
+
+/// Physical terminal cursor declaration for a single frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorDeclaration {
+    /// Column.
+    pub x: usize,
+    /// Row.
+    pub y: usize,
+    /// Whether the physical cursor should be made visible. When `false` the
+    /// cursor is positioned (for IME / screen readers) but not shown — the
+    /// visual cursor is rendered entirely via [`StyleOverlay`] (ink model).
+    /// When `true` the terminal's native cursor is displayed (ratatui model).
+    pub visible: bool,
 }
 
 impl Canvas {
@@ -287,22 +301,25 @@ impl Canvas {
         }
     }
 
-    /// Declares that the physical terminal cursor should be placed at the given canvas
-    /// position after this canvas is written to the terminal.
+    /// Declares the physical terminal cursor position with explicit visibility.
     ///
-    /// This is how text inputs anchor the operating system's IME pre-edit window (and
-    /// screen readers) to the caret: the renderer moves the real cursor there and makes
-    /// it visible once the frame has been committed. Only one declaration can be active
-    /// per frame — the last writer wins. When no component declares a cursor, the
-    /// physical cursor remains hidden.
-    pub fn declare_cursor(&mut self, x: usize, y: usize) {
+    /// - `visible: true` — **ratatui model**: the terminal's native cursor is shown
+    ///   at the given position. Best when you want the terminal to guarantee cursor
+    ///   contrast and respect the user's cursor preferences.
+    /// - `visible: false` — **ink model**: the cursor is positioned for IME and
+    ///   screen readers but stays hidden. The visual cursor is rendered via
+    ///   [`StyleOverlay`] inversion or explicit colors.
+    ///
+    /// Only one declaration can be active per frame — the last writer wins. When no
+    /// component declares a cursor, the physical cursor remains hidden.
+    pub fn declare_cursor(&mut self, x: usize, y: usize, visible: bool) {
         if y < self.cells.len() && x < self.width {
-            self.cursor_declaration = Some((x, y));
+            self.cursor_declaration = Some(CursorDeclaration { x, y, visible });
         }
     }
 
-    /// Returns the declared physical cursor position for this frame, if any.
-    pub fn cursor_declaration(&self) -> Option<(usize, usize)> {
+    /// Returns the declared cursor for this frame, if any.
+    pub fn cursor_declaration(&self) -> Option<CursorDeclaration> {
         self.cursor_declaration
     }
 
@@ -963,7 +980,7 @@ impl CanvasSubviewMut<'_> {
     /// Declares the physical cursor position at the given **relative** subview position.
     /// Out-of-bounds or outside-clip positions are silently ignored.
     /// See [`Canvas::declare_cursor`].
-    pub fn declare_cursor(&mut self, x: isize, y: isize) {
+    pub fn declare_cursor(&mut self, x: isize, y: isize, visible: bool) {
         let abs_x = self.x + x;
         let abs_y = self.y + y;
         if abs_x < self.clip_x
@@ -975,7 +992,8 @@ impl CanvasSubviewMut<'_> {
         {
             return;
         }
-        self.canvas.declare_cursor(abs_x as usize, abs_y as usize);
+        self.canvas
+            .declare_cursor(abs_x as usize, abs_y as usize, visible);
     }
 
     /// Sets a style overlay on a cell at the given **relative** subview position.
@@ -1686,32 +1704,33 @@ line two
 
     #[test]
     fn test_declare_cursor_bounds_and_subview_translation() {
+        let cd = |x, y, v| CursorDeclaration { x, y, visible: v };
         let mut canvas = Canvas::new(10, 5);
         assert_eq!(canvas.cursor_declaration(), None);
 
         // Out-of-bounds declarations are ignored.
-        canvas.declare_cursor(10, 0);
-        canvas.declare_cursor(0, 5);
+        canvas.declare_cursor(10, 0, false);
+        canvas.declare_cursor(0, 5, false);
         assert_eq!(canvas.cursor_declaration(), None);
 
-        canvas.declare_cursor(3, 2);
-        assert_eq!(canvas.cursor_declaration(), Some((3, 2)));
+        canvas.declare_cursor(3, 2, false);
+        assert_eq!(canvas.cursor_declaration(), Some(cd(3, 2, false)));
 
         // Last writer wins.
-        canvas.declare_cursor(1, 1);
-        assert_eq!(canvas.cursor_declaration(), Some((1, 1)));
+        canvas.declare_cursor(1, 1, true);
+        assert_eq!(canvas.cursor_declaration(), Some(cd(1, 1, true)));
 
         // Subview translates relative coordinates and respects clipping.
         {
             let mut sv = canvas.subview_mut(2, 1, 2, 1, 4, 3);
-            sv.declare_cursor(1, 1); // absolute (3, 2)
+            sv.declare_cursor(1, 1, false); // absolute (3, 2)
         }
-        assert_eq!(canvas.cursor_declaration(), Some((3, 2)));
+        assert_eq!(canvas.cursor_declaration(), Some(cd(3, 2, false)));
         {
             let mut sv = canvas.subview_mut(2, 1, 2, 1, 4, 3);
-            sv.declare_cursor(-1, 0); // outside clip — ignored
+            sv.declare_cursor(-1, 0, false); // outside clip — ignored
         }
-        assert_eq!(canvas.cursor_declaration(), Some((3, 2)));
+        assert_eq!(canvas.cursor_declaration(), Some(cd(3, 2, false)));
     }
 
     // ----- P1-5: wide character / grapheme cluster tests -----
