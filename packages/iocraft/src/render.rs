@@ -500,6 +500,7 @@ impl<'a> Tree<'a> {
         mut term: Terminal<'_>,
         throttle: Option<std::time::Duration>,
     ) -> io::Result<()> {
+        term.start_event_stream()?;
         let mut prev_canvas: Option<Canvas> = None;
         let mut mouse_capture_enabled: Option<bool> = None;
         loop {
@@ -554,6 +555,7 @@ impl<'a> Tree<'a> {
                 break;
             }
             select(self.root_component.wait().boxed(), term.wait().boxed()).await;
+            term.resolve_pending_ctrl_c();
             if term.received_ctrl_c() {
                 break;
             }
@@ -574,14 +576,17 @@ impl<'a> Tree<'a> {
                     }
                     let timed_out = {
                         let timer = futures_timer::Delay::new(remaining);
-                        matches!(
-                            futures::future::select(
-                                timer,
-                                select(self.root_component.wait().boxed(), term.wait().boxed()),
-                            )
-                            .await,
-                            futures::future::Either::Left(_)
+                        let timed_out = match futures::future::select(
+                            timer,
+                            select(self.root_component.wait().boxed(), term.wait().boxed()),
                         )
+                        .await
+                        {
+                            futures::future::Either::Left(_) => true,
+                            futures::future::Either::Right(_) => false,
+                        };
+                        term.resolve_pending_ctrl_c();
+                        timed_out
                     };
                     if timed_out || term.received_ctrl_c() {
                         break;
@@ -712,6 +717,37 @@ mod tests {
             "tick: 1\nrender count (a): 2\nrender count (b0): 2\nrender count (b1): 2\nrender count (c0): 2\nrender count (c1): 2\n",
         ];
         assert_eq!(actual, expected);
+    }
+
+    #[derive(Default)]
+    struct RenderWakeCounter {
+        renders: u32,
+    }
+
+    impl Hook for RenderWakeCounter {}
+
+    #[component]
+    fn ResizeWakeComponent(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let counter = hooks.use_hook(RenderWakeCounter::default);
+        counter.renders += 1;
+        let renders = counter.renders;
+        if renders >= 2 {
+            system.exit();
+        }
+        element!(Text(content: format!("render: {renders}")))
+    }
+
+    #[apply(test!)]
+    async fn test_resize_event_wakes_render_loop_without_subscriber() {
+        let canvases: Vec<_> = element!(ResizeWakeComponent)
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(futures::stream::iter(
+                vec![TerminalEvent::Resize(100, 40)],
+            )))
+            .collect()
+            .await;
+        let actual = canvases.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+        assert_eq!(actual, vec!["render: 1\n", "render: 2\n"]);
     }
 
     /// A component that updates state rapidly (every poll) until 20 updates have

@@ -982,6 +982,7 @@ pub(crate) struct Terminal<'a> {
     output: Output,
     event_stream: Option<BoxStream<'static, TerminalEvent>>,
     subscribers: Vec<Weak<Mutex<TerminalEventsInner>>>,
+    pending_ctrl_c: Vec<Arc<SharedEventState>>,
     received_ctrl_c: bool,
     ignore_ctrl_c: bool,
 }
@@ -1004,6 +1005,7 @@ impl<'a> Terminal<'a> {
             output,
             event_stream: None,
             subscribers: Vec::new(),
+            pending_ctrl_c: Vec::new(),
             received_ctrl_c: false,
             ignore_ctrl_c: false,
         })
@@ -1061,6 +1063,23 @@ impl<'a> Terminal<'a> {
         self.received_ctrl_c
     }
 
+    /// Applies the default Ctrl+C behavior after component hooks have had a chance
+    /// to consume the event via propagation. A pending Ctrl+C exits only if none of
+    /// the component callbacks called `stop_propagation()`.
+    pub fn resolve_pending_ctrl_c(&mut self) {
+        if self.ignore_ctrl_c || self.received_ctrl_c {
+            self.pending_ctrl_c.clear();
+            return;
+        }
+        if self
+            .pending_ctrl_c
+            .drain(..)
+            .any(|state| !state.is_propagation_stopped())
+        {
+            self.received_ctrl_c = true;
+        }
+    }
+
     /// Returns `true` (and clears the flag) if the process was resumed from suspension
     /// (SIGCONT) since the last call. The render loop uses this to trigger a full
     /// terminal reinitialization and redraw.
@@ -1105,6 +1124,13 @@ impl<'a> Terminal<'a> {
         f(t.inner)
     }
 
+    pub fn start_event_stream(&mut self) -> io::Result<()> {
+        if self.event_stream.is_none() {
+            self.event_stream = Some(self.inner.event_stream()?);
+        }
+        Ok(())
+    }
+
     pub async fn wait(&mut self) {
         use futures::future::{poll_fn, select, Either};
 
@@ -1122,24 +1148,24 @@ impl<'a> Terminal<'a> {
                 let Some(event) = next else {
                     return;
                 };
-                if !self.ignore_ctrl_c {
-                    if let TerminalEvent::Key(KeyEvent {
+                let is_ctrl_c = matches!(
+                    event,
+                    TerminalEvent::Key(KeyEvent {
                         code: KeyCode::Char('c'),
                         kind: KeyEventKind::Press,
-                        modifiers: KeyModifiers::CONTROL,
-                    }) = event
-                    {
-                        self.received_ctrl_c = true;
-                    }
-                    if self.received_ctrl_c {
-                        return;
-                    }
-                }
-                // All subscribers share one propagation state per event, so a consumer
-                // in a deeply-nested component can stop ancestors from acting on it.
+                        modifiers,
+                        ..
+                    }) if modifiers.contains(KeyModifiers::CONTROL)
+                        && !modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+                );
+                let is_resize = matches!(event, TerminalEvent::Resize(..));
+
+                // Dispatch to all subscribers first — Ctrl+C is a normal event.
                 let shared_state = Arc::new(SharedEventState::default());
+                let mut delivered = false;
                 self.subscribers.retain(|subscriber| {
                     if let Some(subscriber) = subscriber.upgrade() {
+                        delivered = true;
                         let mut subscriber = subscriber.lock().unwrap();
                         subscriber
                             .pending
@@ -1152,6 +1178,20 @@ impl<'a> Terminal<'a> {
                         false
                     }
                 });
+
+                if is_ctrl_c && !self.ignore_ctrl_c {
+                    if delivered {
+                        // Defer default exit until the render loop has polled component
+                        // hooks, giving propagation-aware listeners a chance to consume it.
+                        self.pending_ctrl_c.push(shared_state);
+                    } else {
+                        // No component can consume it, so preserve the default behavior.
+                        self.received_ctrl_c = true;
+                    }
+                }
+                if self.received_ctrl_c || is_resize {
+                    return;
+                }
             },
             None => {
                 let inner = &mut self.inner;
@@ -1161,9 +1201,7 @@ impl<'a> Terminal<'a> {
     }
 
     pub fn events(&mut self) -> io::Result<TerminalEvents> {
-        if self.event_stream.is_none() {
-            self.event_stream = Some(self.inner.event_stream()?);
-        }
+        self.start_event_stream()?;
         let inner = Arc::new(Mutex::new(TerminalEventsInner {
             pending: VecDeque::new(),
             waker: None,
@@ -1182,6 +1220,7 @@ impl Terminal<'static> {
                 output: Output::Stdout,
                 event_stream: None,
                 subscribers: Vec::new(),
+                pending_ctrl_c: Vec::new(),
                 received_ctrl_c: false,
                 ignore_ctrl_c: false,
             },

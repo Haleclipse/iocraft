@@ -1,6 +1,6 @@
 use crate::{
-    ComponentUpdater, FullscreenMouseEvent, Hook, Hooks, PropagatedTerminalEvent, TerminalEvent,
-    TerminalEvents,
+    ComponentUpdater, FullscreenMouseEvent, Hook, Hooks, KeyCode, KeyEventKind, KeyModifiers,
+    PropagatedTerminalEvent, TerminalEvent, TerminalEvents,
 };
 use core::{
     pin::Pin,
@@ -215,11 +215,20 @@ struct UseTerminalEventsImpl {
 
 impl Hook for UseTerminalEventsImpl {
     fn poll_change(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let mut processed_ctrl_c = false;
         while let Some(Poll::Ready(Some((event, state)))) = self
             .events
             .as_mut()
             .map(|events| events.poll_next_shared(cx))
         {
+            processed_ctrl_c |= matches!(
+                &event,
+                TerminalEvent::Key(key)
+                    if key.code == KeyCode::Char('c')
+                        && key.kind == KeyEventKind::Press
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SUPER)
+            );
             // Propagation-aware subscribers skip events already consumed by an
             // earlier (deeper) subscriber. Plain subscribers observe everything.
             if self.propagation_aware && state.is_propagation_stopped() {
@@ -256,7 +265,11 @@ impl Hook for UseTerminalEventsImpl {
                 f(&PropagatedTerminalEvent::new(event, state));
             }
         }
-        Poll::Pending
+        if processed_ctrl_c {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
     }
 
     fn post_component_update(&mut self, updater: &mut ComponentUpdater) {
@@ -358,5 +371,79 @@ mod tests {
             .map(|c| c.to_string().trim().to_string())
             .collect::<Vec<_>>();
         assert_eq!(actual, vec!["", "received click"]);
+    }
+
+    #[component]
+    fn CtrlCObserverComponent(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        hooks.use_terminal_events(|_event| {});
+        element!(View)
+    }
+
+    #[component]
+    fn CtrlCInterceptComponent(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut caught = hooks.use_state(|| false);
+        hooks.use_propagated_terminal_events(move |event| {
+            if matches!(
+                event.event(),
+                TerminalEvent::Key(KeyEvent {
+                    code: KeyCode::Char('c'),
+                    modifiers: KeyModifiers::CONTROL,
+                    kind: KeyEventKind::Press,
+                    ..
+                })
+            ) {
+                caught.set(true);
+                event.stop_propagation();
+            }
+        });
+
+        if caught.get() {
+            system.exit();
+            element!(Text(content:"caught ctrl-c")).into_any()
+        } else {
+            element!(View).into_any()
+        }
+    }
+
+    #[apply(test!)]
+    async fn test_ctrl_shift_c_wakes_for_default_exit_with_subscriber() {
+        let events = stream::once(async {
+            TerminalEvent::Key(KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                kind: KeyEventKind::Press,
+            })
+        })
+        .chain(stream::pending());
+
+        let mut root = element!(CtrlCObserverComponent);
+        let render_loop = root
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(events))
+            .collect::<Vec<_>>();
+        let timeout = futures_timer::Delay::new(std::time::Duration::from_secs(1));
+        let result = futures::future::select(Box::pin(render_loop), Box::pin(timeout)).await;
+        let futures::future::Either::Left((canvases, _)) = result else {
+            panic!("render loop did not wake to resolve pending Ctrl+C");
+        };
+
+        let actual = canvases.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+        assert_eq!(actual, vec![""]);
+    }
+
+    #[apply(test!)]
+    async fn test_ctrl_c_can_be_consumed_before_default_exit() {
+        let canvases: Vec<_> = element!(CtrlCInterceptComponent)
+            .mock_terminal_render_loop(MockTerminalConfig::with_events(stream::iter(vec![
+                TerminalEvent::Key(KeyEvent {
+                    code: KeyCode::Char('c'),
+                    modifiers: KeyModifiers::CONTROL,
+                    kind: KeyEventKind::Press,
+                }),
+            ])))
+            .collect()
+            .await;
+        let actual = canvases.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+        assert_eq!(actual, vec!["", "caught ctrl-c\n"]);
     }
 }
