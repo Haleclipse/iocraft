@@ -1,8 +1,8 @@
-use crate::style::{Color, Weight};
-use crossterm::{
-    csi,
-    style::{Attribute, Colored},
+use crate::ansi::{
+    erase_to_eol, hyperlink_close, hyperlink_open, sgr_attr, sgr_bg, sgr_fg, sgr_reset,
 };
+use crate::style::{Color, Weight};
+use crossterm::style::Attribute;
 use std::{
     env,
     fmt::{self, Display},
@@ -676,44 +676,40 @@ impl Canvas {
                     needs_reset = true;
                 }
                 if needs_reset {
-                    write!(w, csi!("0m"))?;
+                    sgr_reset(&mut w)?;
                     background_color = None;
                     text_style = CanvasTextStyle::default();
                 }
 
                 if effective_style.color != text_style.color {
-                    write!(
-                        w,
-                        csi!("{}m"),
-                        Colored::ForegroundColor(effective_style.color.unwrap_or(Color::Reset))
-                    )?;
+                    sgr_fg(&mut w, effective_style.color.unwrap_or(Color::Reset))?;
                 }
 
                 if effective_style.weight != text_style.weight {
                     match effective_style.weight {
-                        Weight::Bold => write!(w, csi!("{}m"), Attribute::Bold.sgr())?,
+                        Weight::Bold => sgr_attr(&mut w, Attribute::Bold)?,
                         Weight::Normal => {}
-                        Weight::Light => write!(w, csi!("{}m"), Attribute::Dim.sgr())?,
+                        Weight::Light => sgr_attr(&mut w, Attribute::Dim)?,
                     }
                 }
 
                 if effective_style.underline && !text_style.underline {
-                    write!(w, csi!("{}m"), Attribute::Underlined.sgr())?;
+                    sgr_attr(&mut w, Attribute::Underlined)?;
                 }
 
                 if effective_style.italic && !text_style.italic {
-                    write!(w, csi!("{}m"), Attribute::Italic.sgr())?;
+                    sgr_attr(&mut w, Attribute::Italic)?;
                 }
 
                 if effective_style.invert && !text_style.invert {
-                    write!(w, csi!("{}m"), Attribute::Reverse.sgr())?;
+                    sgr_attr(&mut w, Attribute::Reverse)?;
                 }
 
                 text_style = effective_style;
             } else if ansi && !has_style {
                 // Empty cell without overlay — reset active attributes if needed.
                 if text_style.underline || text_style.invert {
-                    write!(w, csi!("0m"))?;
+                    sgr_reset(&mut w)?;
                     background_color = None;
                     text_style = CanvasTextStyle::default();
                 }
@@ -740,25 +736,21 @@ impl Canvas {
                 // any active underline, inversion, background, or hyperlink
                 // would visually extend across the entire remaining line.
                 if text_style.underline || text_style.invert || background_color.is_some() {
-                    write!(w, csi!("0m"))?;
+                    sgr_reset(&mut w)?;
                     background_color = None;
                     text_style = CanvasTextStyle::default();
                 }
                 if active_hyperlink.is_some() {
-                    write!(w, "\x1b]8;;\x1b\\")?;
+                    hyperlink_close(&mut w)?;
                     active_hyperlink = None;
                 }
 
-                write!(w, csi!("K"))?;
+                erase_to_eol(&mut w)?;
                 did_clear_line = true;
             }
 
             if ansi && effective_bg != background_color {
-                write!(
-                    w,
-                    csi!("{}m"),
-                    Colored::BackgroundColor(effective_bg.unwrap_or(Color::Reset))
-                )?;
+                sgr_bg(&mut w, effective_bg.unwrap_or(Color::Reset))?;
                 background_color = effective_bg;
             }
 
@@ -766,22 +758,16 @@ impl Canvas {
             if ansi {
                 if let Some(c) = &cell.character {
                     if c.hyperlink.as_deref() != active_hyperlink.as_deref() {
-                        // Close previous link if any.
                         if active_hyperlink.is_some() {
-                            write!(w, "\x1b]8;;\x1b\\")?;
+                            hyperlink_close(&mut w)?;
                         }
-                        // Open new link if any.
                         if let Some(href) = &c.hyperlink {
-                            w.write_all(b"\x1b]8;;")?;
-                            for ch in href.chars().filter(|ch| !ch.is_control()) {
-                                write!(w, "{ch}")?;
-                            }
-                            w.write_all(b"\x1b\\")?;
+                            hyperlink_open(&mut w, href)?;
                         }
                         active_hyperlink = c.hyperlink.clone();
                     }
                 } else if active_hyperlink.is_some() {
-                    write!(w, "\x1b]8;;\x1b\\")?;
+                    hyperlink_close(&mut w)?;
                     active_hyperlink = None;
                 }
             }
@@ -793,25 +779,20 @@ impl Canvas {
             }
         }
         if ansi {
-            // Close any open hyperlink before the row-end clear.
             if active_hyperlink.is_some() {
-                write!(w, "\x1b]8;;\x1b\\")?;
+                hyperlink_close(&mut w)?;
             }
             if !did_clear_line {
-                // Full SGR reset before CSI K — same rationale as the mid-row
-                // clear above: kitty strictly fills the erased area with the
-                // current SGR state, so any active background, underline, or
-                // inversion would extend to the terminal edge.
                 if background_color.is_some()
                     || text_style.underline
                     || text_style.invert
                     || text_style.weight != Weight::Normal
                 {
-                    write!(w, csi!("0m"))?;
+                    sgr_reset(&mut w)?;
                 }
-                write!(w, csi!("K"))?;
+                erase_to_eol(&mut w)?;
             }
-            write!(w, csi!("0m"))?;
+            sgr_reset(&mut w)?;
         }
         Ok(())
     }
@@ -837,9 +818,7 @@ impl Canvas {
         omit_final_newline: bool,
     ) -> io::Result<()> {
         if ansi {
-            // Seed clean SGR state for the first row. Subsequent rows rely on
-            // the trailing reset of the previous row.
-            write!(w, csi!("0m"))?;
+            sgr_reset(&mut w)?;
         }
         for y in 0..self.cells.len() {
             self.write_row_impl(y, &mut w, ansi)?;
@@ -1075,6 +1054,7 @@ impl CanvasSubviewMut<'_> {
 mod tests {
     use super::*;
     use crate::prelude::*;
+    use crossterm::{csi, style::Colored};
 
     #[test]
     fn test_canvas_background_color() {

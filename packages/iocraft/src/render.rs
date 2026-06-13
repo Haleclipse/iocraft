@@ -22,14 +22,6 @@ use taffy::{
     AvailableSpace, Display, Layout, NodeId, Overflow, Point, Rect, Size, Style, TaffyTree,
 };
 
-fn terminal_title(w: &mut (impl io::Write + ?Sized), title: &str) -> io::Result<()> {
-    w.write_all(b"\x1b]0;")?;
-    for ch in title.chars().filter(|ch| !ch.is_control()) {
-        write!(w, "{ch}")?;
-    }
-    w.write_all(b"\x07")
-}
-
 pub(crate) struct UpdateContext<'a, 'w> {
     terminal: Option<&'a mut Terminal<'w>>,
     layout_engine: &'a mut LayoutEngine,
@@ -555,7 +547,7 @@ impl<'a> Tree<'a> {
                 term.set_keyboard_enhancement_flags(flags)?;
             }
             if let Some(title) = self.system_context.terminal_title() {
-                let _ = terminal_title(term.render_output(), title);
+                let _ = crate::ansi::terminal_title(term.render_output(), title);
                 let _ = term.render_output().flush();
             }
             if self.system_context.should_exit() || term.received_ctrl_c() {
@@ -667,15 +659,6 @@ mod tests {
     use core::future::Future;
     use macro_rules_attribute::apply;
     use smol_macros::test;
-
-    #[test]
-    fn test_terminal_title_filters_control_chars() {
-        let mut buf = Vec::new();
-        super::terminal_title(&mut buf, "safe\x1b]2;owned\x07").unwrap();
-        let output = String::from_utf8(buf).unwrap();
-        assert_eq!(output, "\x1b]0;safe]2;owned\x07");
-        assert!(!output.contains("\x1b]2;owned"));
-    }
 
     #[derive(Default, Props)]
     struct MyInnerComponentProps {
