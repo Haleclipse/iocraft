@@ -808,8 +808,6 @@ impl Canvas {
                     || text_style.weight != Weight::Normal
                 {
                     write!(w, csi!("0m"))?;
-                    background_color = None;
-                    text_style = CanvasTextStyle::default();
                 }
                 write!(w, csi!("K"))?;
             }
