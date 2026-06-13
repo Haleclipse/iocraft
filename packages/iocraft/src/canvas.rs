@@ -32,6 +32,7 @@ pub(crate) enum CellWidth {
 struct Character {
     value: String,
     style: CanvasTextStyle,
+    hyperlink: Option<String>,
 }
 
 /// Compute the **terminal display width** of a string, measuring by grapheme clusters.
@@ -365,12 +366,17 @@ impl Canvas {
         }
     }
 
-    fn set_text_row_chars<I>(&mut self, mut x: usize, y: usize, chars: I, style: CanvasTextStyle)
-    where
+    fn set_text_row_chars<I>(
+        &mut self,
+        mut x: usize,
+        y: usize,
+        chars: I,
+        style: CanvasTextStyle,
+        hyperlink: Option<&str>,
+    ) where
         I: IntoIterator<Item = char>,
     {
         let row = &mut self.cells[y];
-        // Collect into a string first so we can segment by grapheme clusters.
         let text: String = chars.into_iter().collect();
         for grapheme in text.graphemes(true) {
             if x >= row.len() {
@@ -390,6 +396,7 @@ impl Canvas {
             // Place the grapheme in the current cell.
             row[x].character = Some(Character {
                 value: grapheme.to_string(),
+                hyperlink: hyperlink.map(|s| s.to_string()),
                 style,
             });
             if width >= 2 {
@@ -577,6 +584,7 @@ impl Canvas {
 
         let mut background_color = None;
         let mut text_style = CanvasTextStyle::default();
+        let mut active_hyperlink: Option<String> = None;
         let mut col = 0;
         let mut did_clear_line = false;
         while col < row.len() {
@@ -677,9 +685,18 @@ impl Canvas {
             }
 
             if ansi && col >= self.width {
-                if background_color.is_some() {
-                    write!(w, csi!("{}m"), Colored::BackgroundColor(Color::Reset))?;
+                // Reset ALL attributes that would bleed into the cleared area.
+                // CSI K clears to end of line using the current SGR state, so
+                // any active underline, inversion, background, or hyperlink
+                // would visually extend across the entire remaining line.
+                if text_style.underline || text_style.invert || background_color.is_some() {
+                    write!(w, csi!("0m"))?;
                     background_color = None;
+                    text_style = CanvasTextStyle::default();
+                }
+                if active_hyperlink.is_some() {
+                    write!(w, "\x1b]8;;\x1b\\")?;
+                    active_hyperlink = None;
                 }
 
                 write!(w, csi!("K"))?;
@@ -695,6 +712,26 @@ impl Canvas {
                 background_color = effective_bg;
             }
 
+            // OSC 8 hyperlink: emit open/close sequences around the character.
+            if ansi {
+                if let Some(c) = &cell.character {
+                    if c.hyperlink.as_deref() != active_hyperlink.as_deref() {
+                        // Close previous link if any.
+                        if active_hyperlink.is_some() {
+                            write!(w, "\x1b]8;;\x1b\\")?;
+                        }
+                        // Open new link if any.
+                        if let Some(href) = &c.hyperlink {
+                            write!(w, "\x1b]8;;{}\x1b\\", href)?;
+                        }
+                        active_hyperlink = c.hyperlink.clone();
+                    }
+                } else if active_hyperlink.is_some() {
+                    write!(w, "\x1b]8;;\x1b\\")?;
+                    active_hyperlink = None;
+                }
+            }
+
             if let Some(c) = &cell.character {
                 write!(w, "{}{}", c.value, " ".repeat(c.required_padding()))?;
             } else {
@@ -702,10 +739,24 @@ impl Canvas {
             }
         }
         if ansi {
-            if background_color.is_some() {
-                write!(w, csi!("{}m"), Colored::BackgroundColor(Color::Reset))?;
+            // Close any open hyperlink before the row-end clear.
+            if active_hyperlink.is_some() {
+                write!(w, "\x1b]8;;\x1b\\")?;
             }
             if !did_clear_line {
+                // Full SGR reset before CSI K — same rationale as the mid-row
+                // clear above: kitty strictly fills the erased area with the
+                // current SGR state, so any active background, underline, or
+                // inversion would extend to the terminal edge.
+                if background_color.is_some()
+                    || text_style.underline
+                    || text_style.invert
+                    || text_style.weight != Weight::Normal
+                {
+                    write!(w, csi!("0m"))?;
+                    background_color = None;
+                    text_style = CanvasTextStyle::default();
+                }
                 write!(w, csi!("K"))?;
             }
             write!(w, csi!("0m"))?;
@@ -910,6 +961,18 @@ impl CanvasSubviewMut<'_> {
 
     /// Writes text to the region.
     pub fn set_text(&mut self, x: isize, y: isize, text: &str, style: CanvasTextStyle) {
+        self.set_text_with_link(x, y, text, style, None);
+    }
+
+    /// Writes text to the region, optionally wrapping it in an OSC 8 hyperlink.
+    pub fn set_text_with_link(
+        &mut self,
+        x: isize,
+        y: isize,
+        text: &str,
+        style: CanvasTextStyle,
+        hyperlink: Option<&str>,
+    ) {
         let mut x = self.x + x;
         let min_x = self.clip_x.max(0);
         let mut to_skip = 0;
@@ -947,6 +1010,7 @@ impl CanvasSubviewMut<'_> {
                             }
                         }),
                     style,
+                    hyperlink,
                 );
             }
             y += 1;
@@ -978,12 +1042,7 @@ mod tests {
         write!(expected, "  ").unwrap();
         write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
         write!(expected, "   ").unwrap();
-        write!(
-            expected,
-            csi!("{}m"),
-            Colored::BackgroundColor(Color::Reset)
-        )
-        .unwrap();
+        write!(expected, csi!("0m")).unwrap();
         write!(expected, csi!("K")).unwrap();
         write!(expected, csi!("0m")).unwrap();
         write!(expected, "\r\n").unwrap();
@@ -991,12 +1050,7 @@ mod tests {
         write!(expected, "  ").unwrap();
         write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
         write!(expected, "   ").unwrap();
-        write!(
-            expected,
-            csi!("{}m"),
-            Colored::BackgroundColor(Color::Reset)
-        )
-        .unwrap();
+        write!(expected, csi!("0m")).unwrap();
         write!(expected, csi!("K")).unwrap();
         write!(expected, csi!("0m")).unwrap();
         write!(expected, "\r\n").unwrap();
@@ -1031,63 +1085,30 @@ mod tests {
         write!(expected, csi!("0m")).unwrap();
         write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
         write!(expected, "     ").unwrap();
-        write!(
-            expected,
-            csi!("{}m"),
-            Colored::BackgroundColor(Color::Reset)
-        )
-        .unwrap();
+        write!(expected, csi!("0m")).unwrap();
         write!(expected, csi!("K")).unwrap();
         write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
         write!(expected, " ").unwrap();
-        write!(
-            expected,
-            csi!("{}m"),
-            Colored::BackgroundColor(Color::Reset)
-        )
-        .unwrap();
         write!(expected, csi!("0m")).unwrap();
         write!(expected, "\r\n").unwrap();
 
         // line 2
         write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
         write!(expected, "     ").unwrap();
-        write!(
-            expected,
-            csi!("{}m"),
-            Colored::BackgroundColor(Color::Reset)
-        )
-        .unwrap();
+        write!(expected, csi!("0m")).unwrap();
         write!(expected, csi!("K")).unwrap();
         write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
         write!(expected, " ").unwrap();
-        write!(
-            expected,
-            csi!("{}m"),
-            Colored::BackgroundColor(Color::Reset)
-        )
-        .unwrap();
         write!(expected, csi!("0m")).unwrap();
         write!(expected, "\r\n").unwrap();
 
         // line 3
         write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
         write!(expected, "     ").unwrap();
-        write!(
-            expected,
-            csi!("{}m"),
-            Colored::BackgroundColor(Color::Reset)
-        )
-        .unwrap();
+        write!(expected, csi!("0m")).unwrap();
         write!(expected, csi!("K")).unwrap();
         write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
         write!(expected, " ").unwrap();
-        write!(
-            expected,
-            csi!("{}m"),
-            Colored::BackgroundColor(Color::Reset)
-        )
-        .unwrap();
         write!(expected, csi!("0m")).unwrap();
         write!(expected, "\r\n").unwrap();
 
@@ -1725,6 +1746,72 @@ line two
             "wide must be overlayed too"
         );
         assert!(canvas.overlays[0][1].is_some());
+    }
+
+    #[test]
+    fn test_hyperlink_osc8_output() {
+        let mut canvas = Canvas::new(20, 1);
+        canvas.subview_mut(0, 0, 0, 0, 20, 1).set_text_with_link(
+            0,
+            0,
+            "click me",
+            CanvasTextStyle::default(),
+            Some("https://example.com"),
+        );
+        let mut buf = Vec::new();
+        canvas.write_ansi(&mut buf).unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        // OSC 8 open sequence
+        assert!(
+            output.contains("\x1b]8;;https://example.com\x1b\\"),
+            "expected OSC 8 open: {output:?}"
+        );
+        // OSC 8 close sequence
+        assert!(
+            output.contains("\x1b]8;;\x1b\\"),
+            "expected OSC 8 close: {output:?}"
+        );
+        assert!(output.contains("click me"), "text content: {output:?}");
+    }
+
+    #[test]
+    fn test_hyperlink_not_emitted_without_href() {
+        let mut canvas = Canvas::new(10, 1);
+        canvas
+            .subview_mut(0, 0, 0, 0, 10, 1)
+            .set_text(0, 0, "plain", CanvasTextStyle::default());
+        let mut buf = Vec::new();
+        canvas.write_ansi(&mut buf).unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        assert!(
+            !output.contains("\x1b]8;"),
+            "no OSC 8 for plain text: {output:?}"
+        );
+    }
+
+    #[test]
+    fn test_hyperlink_adjacent_links() {
+        let mut canvas = Canvas::new(20, 1);
+        canvas.subview_mut(0, 0, 0, 0, 10, 1).set_text_with_link(
+            0,
+            0,
+            "aaa",
+            CanvasTextStyle::default(),
+            Some("https://a.com"),
+        );
+        canvas.subview_mut(3, 0, 3, 0, 10, 1).set_text_with_link(
+            0,
+            0,
+            "bbb",
+            CanvasTextStyle::default(),
+            Some("https://b.com"),
+        );
+        let mut buf = Vec::new();
+        canvas.write_ansi(&mut buf).unwrap();
+        let output = String::from_utf8_lossy(&buf);
+        // Both links present
+        assert!(output.contains("https://a.com"), "link a: {output:?}");
+        assert!(output.contains("https://b.com"), "link b: {output:?}");
     }
 
     #[test]

@@ -549,9 +549,11 @@ impl<'a> Tree<'a> {
                 }
             }
             if let Some(flags) = self.system_context.keyboard_enhancement_flags() {
-                // Change-detection happens inside the terminal; repeated calls with
-                // the same flags are no-ops.
                 term.set_keyboard_enhancement_flags(flags)?;
+            }
+            if let Some(title) = self.system_context.terminal_title() {
+                use crossterm::{terminal::SetTitle, QueueableCommand};
+                let _ = term.render_output().queue(SetTitle(title));
             }
             if self.system_context.should_exit() || term.received_ctrl_c() {
                 break;
