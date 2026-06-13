@@ -63,6 +63,12 @@ pub struct TextProps {
 
     /// Whether to invert the text's foreground and background colors.
     pub invert: bool,
+
+    /// If set, renders the text as an OSC 8 hyperlink. Terminals with support
+    /// (kitty, iTerm2, WezTerm, Windows Terminal, etc.) allow clicking or
+    /// Cmd/Ctrl-clicking to open the URL. Unsupported terminals display the
+    /// text normally.
+    pub href: Option<String>,
 }
 
 /// `Text` is a component that renders a text string.
@@ -83,6 +89,7 @@ pub struct Text {
     content: String,
     wrap: TextWrap,
     align: TextAlign,
+    hyperlink: Option<String>,
 }
 
 impl Text {
@@ -207,6 +214,15 @@ impl<'a, 'b> TextDrawer<'a, 'b> {
         lines: impl IntoIterator<Item = &'c str>,
         style: CanvasTextStyle,
     ) {
+        self.append_lines_with_link(lines, style, None);
+    }
+
+    pub fn append_lines_with_link<'c>(
+        &mut self,
+        lines: impl IntoIterator<Item = &'c str>,
+        style: CanvasTextStyle,
+        hyperlink: Option<&str>,
+    ) {
         let mut lines = lines.into_iter().peekable();
         while let Some(mut line) = lines.next() {
             if self.skip_leading_whitespace && !self.line_encountered_non_whitespace {
@@ -221,7 +237,9 @@ impl<'a, 'b> TextDrawer<'a, 'b> {
                     self.line_encountered_non_whitespace = true;
                 }
             }
-            self.drawer.canvas().set_text(self.x, self.y, line, style);
+            self.drawer
+                .canvas()
+                .set_text_with_link(self.x, self.y, line, style, hyperlink);
             if lines.peek().is_some() {
                 self.y += 1;
                 self.x = self.x_offset;
@@ -253,6 +271,7 @@ impl Component for Text {
             italic: props.italic,
             invert: props.invert,
         };
+        self.hyperlink = props.href.clone();
         self.content = strip_ansi(&props.content).into_owned();
         self.wrap = props.wrap;
         self.align = props.align;
@@ -269,7 +288,7 @@ impl Component for Text {
         );
         let (x_offset, content) = Self::align(content, self.align, width as _);
         let mut drawer = TextDrawer::new(drawer, x_offset, self.align != TextAlign::Left);
-        drawer.append_lines(content.lines(), self.style);
+        drawer.append_lines_with_link(content.lines(), self.style, self.hyperlink.as_deref());
     }
 }
 
@@ -339,6 +358,8 @@ mod tests {
             write!(expected, "   ").unwrap();
             write!(expected, csi!("{}m"), Attribute::Underlined.sgr()).unwrap();
             write!(expected, "this is an").unwrap();
+            // Full SGR reset before CSI K so underline doesn't bleed on kitty.
+            write!(expected, csi!("0m")).unwrap();
             write!(expected, csi!("K")).unwrap();
             write!(expected, csi!("0m")).unwrap();
             write!(expected, "\r\n").unwrap();
@@ -346,6 +367,7 @@ mod tests {
             write!(expected, " ").unwrap();
             write!(expected, csi!("{}m"), Attribute::Underlined.sgr()).unwrap();
             write!(expected, "alignment test").unwrap();
+            write!(expected, csi!("0m")).unwrap();
             write!(expected, csi!("K")).unwrap();
             write!(expected, csi!("0m")).unwrap();
             write!(expected, "\r\n").unwrap();

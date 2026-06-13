@@ -9,6 +9,7 @@ pub struct SystemContext {
     should_exit: bool,
     mouse_capture: Option<bool>,
     keyboard_enhancement_flags: Option<crate::KeyboardEnhancementFlags>,
+    terminal_title: Option<String>,
 }
 
 impl SystemContext {
@@ -17,6 +18,7 @@ impl SystemContext {
             should_exit: false,
             mouse_capture: None,
             keyboard_enhancement_flags: None,
+            terminal_title: None,
         }
     }
 
@@ -54,6 +56,17 @@ impl SystemContext {
 
     pub(crate) fn keyboard_enhancement_flags(&self) -> Option<crate::KeyboardEnhancementFlags> {
         self.keyboard_enhancement_flags
+    }
+
+    /// Sets the terminal window title (OSC 0). The title is applied after the current
+    /// render pass. Call this on every render to keep the title up-to-date, or once to
+    /// set it and leave it — terminals retain the title until it is changed again.
+    pub fn set_terminal_title(&mut self, title: impl Into<String>) {
+        self.terminal_title = Some(title.into());
+    }
+
+    pub(crate) fn terminal_title(&self) -> Option<&str> {
+        self.terminal_title.as_deref()
     }
 }
 

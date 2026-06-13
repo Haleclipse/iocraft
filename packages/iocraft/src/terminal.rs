@@ -561,6 +561,11 @@ impl TerminalImpl for StdTerminal<'_> {
                     self.cursor_displacement_rows = rows_up;
                 }
                 if !self.cursor_visible {
+                    // Use SteadyBlock to avoid blinking — the visual cursor
+                    // is rendered via style overlay (SGR Reverse), and a
+                    // blinking physical cursor on top creates visual noise.
+                    // Maps to: CC codex-rs/tui tui.rs SetCursorStyle::SteadyBlock
+                    let _ = self.dest.queue(cursor::SetCursorStyle::SteadyBlock);
                     self.dest.queue(cursor::Show)?;
                     self.cursor_visible = true;
                 }
@@ -865,6 +870,9 @@ impl Drop for StdTerminal<'_> {
         } else if self.prev_canvas_height > 0 {
             let _ = self.dest.write_all(b"\r\n");
         }
+        // Restore default cursor style before showing — undo the SteadyBlock
+        // set during rendering so the user's shell gets its preferred style back.
+        let _ = self.dest.queue(cursor::SetCursorStyle::DefaultUserShape);
         let _ = self.dest.execute(cursor::Show);
         unregister_terminal_for_panic_restore(self.fullscreen);
     }
