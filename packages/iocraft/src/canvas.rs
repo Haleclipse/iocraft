@@ -9,12 +9,102 @@ use std::{
     io::{self, Write},
     sync::Once,
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthChar;
+
+/// Tracks whether a cell is a standalone character, the first column of a wide
+/// (double-width) character, or a trailing placeholder that the wide character
+/// spills into. See the module-level documentation for why this matters.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CellWidth {
+    /// A normal single-column character.
+    #[default]
+    Normal,
+    /// The first column of a double-width character (CJK, emoji, etc.).
+    Wide,
+    /// The second column occupied by a [`Wide`](CellWidth::Wide) character in the
+    /// preceding cell. This cell carries no independent content — its `character`
+    /// field is `None`.
+    WidthTail,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 struct Character {
     value: String,
     style: CanvasTextStyle,
+}
+
+/// Compute the **terminal display width** of a string, measuring by grapheme clusters.
+///
+/// This is the replacement for `UnicodeWidthStr::width()` throughout the rendering
+/// pipeline: it counts the same way terminals render, including ZWJ emoji families
+/// and CJK characters.
+pub(crate) fn string_display_width(s: &str) -> usize {
+    // Fast path: pure ASCII.
+    if s.is_ascii() {
+        return s.len();
+    }
+    s.graphemes(true).map(grapheme_width).sum()
+}
+
+/// Compute the **terminal display width** of a single grapheme cluster.
+///
+/// This mirrors the logic of npm `string-width` / `Bun.stringWidth` that Claude Code
+/// uses for layout measurement:
+///
+/// 1. Zero-width clusters (pure control/format/mark codepoints) → 0
+/// 2. Multi-codepoint clusters containing at least two codepoints with nonzero width
+///    (ZWJ emoji family sequences, keycap sequences, etc.) → 2
+/// 3. Single visible codepoint → its `UnicodeWidthChar::width()` (East Asian Width)
+///
+/// This is a best-effort approximation. True terminal rendering width varies across
+/// terminals and Unicode versions; the only authoritative answer would come from
+/// querying the terminal itself. For CJK text and common emoji this is accurate on
+/// modern terminals (kitty, iTerm2, WezTerm, Ghostty, Windows Terminal).
+fn grapheme_width(grapheme: &str) -> usize {
+    // Fast path: single ASCII byte.
+    let bytes = grapheme.as_bytes();
+    if bytes.len() == 1 {
+        let b = bytes[0];
+        return if (0x20..=0x7E).contains(&b) { 1 } else { 0 };
+    }
+
+    // Count codepoints with nonzero individual width.
+    let mut visible_cps = 0usize;
+    let mut first_visible_width = 0usize;
+    for ch in grapheme.chars() {
+        let w = ch.width().unwrap_or(0);
+        if w > 0 {
+            visible_cps += 1;
+            if first_visible_width == 0 {
+                first_visible_width = w;
+            }
+        }
+    }
+
+    // Pure zero-width cluster (combining marks, control chars, etc.).
+    if visible_cps == 0 {
+        return 0;
+    }
+
+    // Multi-codepoint cluster with multiple visible codepoints: ZWJ emoji families,
+    // flag sequences, keycap sequences. Modern terminals render these as a single
+    // double-width glyph.
+    if visible_cps >= 2 {
+        return 2;
+    }
+
+    // Single visible codepoint plus VS16 (emoji presentation selector): terminals
+    // render the emoji presentation as 2 columns even when the base character's East
+    // Asian Width says 1. Example: ☀ (U+2600, EAW:Ambiguous → 1) + VS16 → ☀️.
+    // Other single-visible-codepoint clusters, such as `e` + combining acute accent,
+    // keep the base character's width.
+    if grapheme.contains('\u{fe0f}') {
+        return 2;
+    }
+
+    // Single visible codepoint, optionally with combining marks: use its East Asian Width.
+    first_visible_width
 }
 
 static mut HANDLES_VS16_INCORRECTLY: bool = false;
@@ -44,7 +134,7 @@ impl Character {
     fn required_padding(&self) -> usize {
         if self.value.contains('\u{fe0f}') {
             if handles_vs16_incorrectly() {
-                self.value.width() - 1
+                string_display_width(&self.value).saturating_sub(1)
             } else {
                 0
             }
@@ -121,6 +211,36 @@ pub struct CanvasCell {
     /// The background color of this cell, if set.
     pub background_color: Option<Color>,
     character: Option<Character>,
+    /// Whether this cell is a normal character, the first column of a wide character,
+    /// or a trailing placeholder.
+    pub(crate) cell_width: CellWidth,
+}
+
+fn clear_cell_width_relationship(row: &mut [CanvasCell], x: usize) {
+    let Some(width) = row.get(x).map(|cell| cell.cell_width) else {
+        return;
+    };
+    match width {
+        CellWidth::Wide => {
+            row[x].character = None;
+            row[x].cell_width = CellWidth::Normal;
+            if x + 1 < row.len() && row[x + 1].cell_width == CellWidth::WidthTail {
+                row[x + 1].character = None;
+                row[x + 1].cell_width = CellWidth::Normal;
+            }
+        }
+        CellWidth::WidthTail => {
+            row[x].character = None;
+            row[x].cell_width = CellWidth::Normal;
+            if x > 0 && row[x - 1].cell_width == CellWidth::Wide {
+                row[x - 1].character = None;
+                row[x - 1].cell_width = CellWidth::Normal;
+            }
+        }
+        CellWidth::Normal => {
+            row[x].character = None;
+        }
+    }
 }
 
 impl CanvasCell {
@@ -226,6 +346,13 @@ impl Canvas {
             };
             let mut s = String::with_capacity(trim_end);
             for cell in &slice[..trim_end] {
+                // WidthTail cells are trailing placeholders of wide characters —
+                // they carry no independent content and must be skipped during text
+                // extraction. This fixes the phantom space that previously appeared
+                // after every CJK character (e.g. "中 文" instead of "中文").
+                if cell.cell_width == CellWidth::WidthTail {
+                    continue;
+                }
                 match cell.character.as_ref() {
                     Some(ch) => s.push_str(&ch.value),
                     None => s.push(' '),
@@ -244,7 +371,7 @@ impl Canvas {
             if let Some(row) = self.cells.get_mut(y) {
                 for x in x..x + w {
                     if x < row.len() {
-                        row[x].character = None;
+                        clear_cell_width_relationship(row, x);
                     }
                 }
             }
@@ -267,34 +394,84 @@ impl Canvas {
     where
         I: IntoIterator<Item = char>,
     {
-        // Divide the string up into characters, which may consist of multiple Unicode code points.
         let row = &mut self.cells[y];
-        let mut buf = String::new();
-        for c in chars.into_iter() {
+        // Collect into a string first so we can segment by grapheme clusters.
+        let text: String = chars.into_iter().collect();
+        for grapheme in text.graphemes(true) {
             if x >= row.len() {
                 break;
             }
-            let width = c.width().unwrap_or(0);
-            if width > 0 && !buf.is_empty() {
-                row[x].character = Some(Character {
-                    value: buf.clone(),
-                    style,
-                });
-                x += buf.width().max(1);
-                buf.clear();
+            let width = grapheme_width(grapheme);
+            if width == 0 {
+                // Zero-width grapheme: append to the preceding cell's value if one
+                // exists (e.g. combining marks following a base character).
+                if x > 0 {
+                    if let Some(ch) = &mut row[x - 1].character {
+                        ch.value.push_str(grapheme);
+                    }
+                }
+                continue;
             }
-            buf.push(c);
-        }
-        if !buf.is_empty() && x < row.len() {
-            row[x].character = Some(Character { value: buf, style });
+            // Remove any stale wide-character relationship before overwriting this cell.
+            // This prevents old WidthTail markers from surviving when a wide glyph is
+            // replaced by a narrow one, or when writing starts in the tail cell.
+            clear_cell_width_relationship(row, x);
+            if width >= 2 && x + 1 < row.len() {
+                clear_cell_width_relationship(row, x + 1);
+            }
+
+            // Place the grapheme in the current cell.
+            row[x].character = Some(Character {
+                value: grapheme.to_string(),
+                style,
+            });
+            if width >= 2 {
+                row[x].cell_width = CellWidth::Wide;
+                // Mark the trailing cell as a placeholder.
+                if x + 1 < row.len() {
+                    row[x + 1].character = None;
+                    row[x + 1].cell_width = CellWidth::WidthTail;
+                }
+            } else {
+                row[x].cell_width = CellWidth::Normal;
+            }
+            x += width;
         }
     }
 
     /// Sets a style overlay on a single cell, without altering the cell's original text or style.
+    ///
+    /// If the cell is [`CellWidth::Wide`], the overlay is automatically extended to the
+    /// trailing [`CellWidth::WidthTail`] cell as well, preventing the "half-character
+    /// inverted" artefact for CJK and emoji characters. Conversely, if the target cell
+    /// is a `WidthTail`, the overlay is applied to both the tail and its leading `Wide`
+    /// cell. Callers do not need to know whether a cell is wide.
     pub fn set_overlay(&mut self, x: usize, y: usize, overlay: StyleOverlay) {
         if let Some(row) = self.overlays.get_mut(y) {
             if let Some(slot) = row.get_mut(x) {
                 *slot = Some(overlay);
+            }
+        }
+        // Auto-expand across the wide character's cells.
+        if let Some(cell_row) = self.cells.get(y) {
+            if let Some(cell) = cell_row.get(x) {
+                match cell.cell_width {
+                    CellWidth::Wide => {
+                        if let Some(row) = self.overlays.get_mut(y) {
+                            if let Some(slot) = row.get_mut(x + 1) {
+                                *slot = Some(overlay);
+                            }
+                        }
+                    }
+                    CellWidth::WidthTail if x > 0 => {
+                        if let Some(row) = self.overlays.get_mut(y) {
+                            if let Some(slot) = row.get_mut(x - 1) {
+                                *slot = Some(overlay);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -517,8 +694,17 @@ impl Canvas {
                 }
             }
 
+            // WidthTail cells are trailing placeholders of wide characters. The
+            // terminal cursor already advanced past them when the wide char was
+            // written from the preceding Wide cell. Skip them entirely — writing
+            // anything here would push the cursor further and corrupt alignment.
+            if cell.cell_width == CellWidth::WidthTail {
+                col += 1;
+                continue;
+            }
+
             if let Some(c) = &cell.character {
-                col += c.value.width().max(1);
+                col += grapheme_width(&c.value).max(1);
             } else {
                 col += 1;
             }
@@ -1117,6 +1303,19 @@ mod tests {
     }
 
     #[test]
+    fn test_clear_text_clears_wide_character_relationships() {
+        let mut canvas = Canvas::new(10, 1);
+        {
+            let mut sv = canvas.subview_mut(0, 0, 0, 0, 10, 1);
+            sv.set_text(0, 0, "中", CanvasTextStyle::default());
+            sv.clear_text(1, 0, 1, 1);
+        }
+        assert_eq!(canvas.cells[0][0].cell_width, CellWidth::Normal);
+        assert_eq!(canvas.cells[0][1].cell_width, CellWidth::Normal);
+        assert_eq!(canvas.get_text(0, 0, 10, 1), "");
+    }
+
+    #[test]
     fn test_write_ansi_without_final_newline() {
         let mut canvas = Canvas::new(10, 3);
 
@@ -1488,6 +1687,117 @@ line two
             sv.declare_cursor(-1, 0); // outside clip — ignored
         }
         assert_eq!(canvas.cursor_declaration(), Some((3, 2)));
+    }
+
+    // ----- P1-5: wide character / grapheme cluster tests -----
+
+    #[test]
+    fn test_grapheme_width() {
+        assert_eq!(grapheme_width("a"), 1);
+        assert_eq!(grapheme_width("中"), 2);
+        assert_eq!(grapheme_width("☀\u{fe0f}"), 2); // sun + VS16
+        assert_eq!(grapheme_width("e\u{0301}"), 1); // e + combining acute accent
+        assert_eq!(grapheme_width("\u{0301}"), 0); // combining acute accent
+        assert_eq!(grapheme_width("\u{200d}"), 0); // ZWJ
+    }
+
+    #[test]
+    fn test_string_display_width() {
+        assert_eq!(string_display_width("hello"), 5);
+        assert_eq!(string_display_width("中文"), 4);
+        assert_eq!(string_display_width("☀\u{fe0f}☀\u{fe0f}"), 4);
+        assert_eq!(string_display_width("ab中c"), 5);
+    }
+
+    #[test]
+    fn test_cjk_get_text_no_phantom_space() {
+        let mut canvas = Canvas::new(20, 1);
+        canvas
+            .subview_mut(0, 0, 0, 0, 20, 1)
+            .set_text(0, 0, "中文abc", CanvasTextStyle::default());
+        assert_eq!(canvas.get_text(0, 0, 20, 1), "中文abc");
+    }
+
+    #[test]
+    fn test_wide_cell_width_marks() {
+        let mut canvas = Canvas::new(10, 1);
+        canvas
+            .subview_mut(0, 0, 0, 0, 10, 1)
+            .set_text(0, 0, "中a", CanvasTextStyle::default());
+        assert_eq!(canvas.cells[0][0].cell_width, CellWidth::Wide);
+        assert_eq!(canvas.cells[0][1].cell_width, CellWidth::WidthTail);
+        assert_eq!(canvas.cells[0][2].cell_width, CellWidth::Normal);
+    }
+
+    #[test]
+    fn test_overwriting_wide_character_clears_stale_tail() {
+        let mut canvas = Canvas::new(10, 1);
+        {
+            let mut sv = canvas.subview_mut(0, 0, 0, 0, 10, 1);
+            sv.set_text(0, 0, "中", CanvasTextStyle::default());
+            sv.set_text(0, 0, "ab", CanvasTextStyle::default());
+        }
+        assert_eq!(canvas.cells[0][0].cell_width, CellWidth::Normal);
+        assert_eq!(canvas.cells[0][1].cell_width, CellWidth::Normal);
+        assert_eq!(canvas.get_text(0, 0, 10, 1), "ab");
+    }
+
+    #[test]
+    fn test_writing_into_width_tail_clears_leading_wide_cell() {
+        let mut canvas = Canvas::new(10, 1);
+        {
+            let mut sv = canvas.subview_mut(0, 0, 0, 0, 10, 1);
+            sv.set_text(0, 0, "中", CanvasTextStyle::default());
+            sv.set_text(1, 0, "a", CanvasTextStyle::default());
+        }
+        assert_eq!(canvas.cells[0][0].cell_width, CellWidth::Normal);
+        assert_eq!(canvas.cells[0][1].cell_width, CellWidth::Normal);
+        assert_eq!(canvas.get_text(0, 0, 10, 1), " a");
+    }
+
+    #[test]
+    fn test_overlay_auto_expand_to_wide_tail() {
+        let mut canvas = Canvas::new(10, 1);
+        canvas
+            .subview_mut(0, 0, 0, 0, 10, 1)
+            .set_text(0, 0, "中ab", CanvasTextStyle::default());
+        // Overlay on the Wide cell auto-extends to the Tail.
+        canvas.set_overlay(
+            0,
+            0,
+            StyleOverlay {
+                invert: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(canvas.overlays[0][0].is_some());
+        assert!(
+            canvas.overlays[0][1].is_some(),
+            "tail must be overlayed too"
+        );
+        assert!(canvas.overlays[0][2].is_none());
+    }
+
+    #[test]
+    fn test_overlay_on_width_tail_expands_to_wide() {
+        let mut canvas = Canvas::new(10, 1);
+        canvas
+            .subview_mut(0, 0, 0, 0, 10, 1)
+            .set_text(0, 0, "中ab", CanvasTextStyle::default());
+        // Overlay on the Tail cell auto-extends to the Wide cell.
+        canvas.set_overlay(
+            1,
+            0,
+            StyleOverlay {
+                invert: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(
+            canvas.overlays[0][0].is_some(),
+            "wide must be overlayed too"
+        );
+        assert!(canvas.overlays[0][1].is_some());
     }
 
     #[test]

@@ -484,8 +484,13 @@ mod tests {
             "},
         );
 
+        // ☀️ (U+2600 + U+FE0F) is a grapheme cluster rendered as 2 columns on modern
+        // terminals. The extra_space hack for handles_vs16_incorrectly() terminals
+        // compensates for the rare case where the cursor only advances 1 column.
         let extra_space = if handles_vs16_incorrectly() { " " } else { "" };
 
+        // With grapheme-based width, ☀️ (U+2600 + VS16) is correctly measured as
+        // 2 columns. Centering in a 6-column content area: 2 pad + 2 emoji + 2 pad.
         assert_eq!(
             element! {
                 View(width: 8, border_style: BorderStyle::Single, justify_content: JustifyContent::Center) {
@@ -500,6 +505,7 @@ mod tests {
             "}, extra_space),
         );
 
+        // Two sun emojis: 2*2=4 columns of content in 6 columns: 1 pad each side.
         assert_eq!(
             element! {
                 View(width: 8, border_style: BorderStyle::Single, justify_content: JustifyContent::Center) {

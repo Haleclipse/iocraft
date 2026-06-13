@@ -9,7 +9,7 @@ use crate::{
     Props, Size, StyleOverlay, TerminalEvent,
 };
 use std::sync::Arc;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 trait UseCursorOverlay {
     fn use_cursor_overlay(&mut self) -> &mut CursorOverlayState;
@@ -195,7 +195,8 @@ impl TextBuffer {
             if offset >= row.offset {
                 let offset_in_row = offset - row.offset;
                 if offset_in_row <= row.len {
-                    let col = self.text[row.offset..offset].width() as u16;
+                    let col =
+                        crate::canvas::string_display_width(&self.text[row.offset..offset]) as u16;
                     return (i as _, col);
                 }
             }
