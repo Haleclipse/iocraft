@@ -636,7 +636,6 @@ impl Canvas {
         let mut text_style = CanvasTextStyle::default();
         let mut active_hyperlink: Option<String> = None;
         let mut col = 0;
-        let mut did_clear_line = false;
         while col < row.len() {
             let cell = &row[col];
             let overlay = overlay_row
@@ -730,25 +729,6 @@ impl Canvas {
                 col += 1;
             }
 
-            if ansi && col >= self.width {
-                // Reset ALL attributes that would bleed into the cleared area.
-                // CSI K clears to end of line using the current SGR state, so
-                // any active underline, inversion, background, or hyperlink
-                // would visually extend across the entire remaining line.
-                if text_style.underline || text_style.invert || background_color.is_some() {
-                    sgr_reset(&mut w)?;
-                    background_color = None;
-                    text_style = CanvasTextStyle::default();
-                }
-                if active_hyperlink.is_some() {
-                    hyperlink_close(&mut w)?;
-                    active_hyperlink = None;
-                }
-
-                erase_to_eol(&mut w)?;
-                did_clear_line = true;
-            }
-
             if ansi && effective_bg != background_color {
                 sgr_bg(&mut w, effective_bg.unwrap_or(Color::Reset))?;
                 background_color = effective_bg;
@@ -778,20 +758,20 @@ impl Canvas {
                 w.write_all(b" ")?;
             }
         }
+        // Row-end: single exit path for erase-to-EOL. Reset only the
+        // attributes that would bleed into the erased area, then clear.
         if ansi {
             if active_hyperlink.is_some() {
                 hyperlink_close(&mut w)?;
             }
-            if !did_clear_line {
-                if background_color.is_some()
-                    || text_style.underline
-                    || text_style.invert
-                    || text_style.weight != Weight::Normal
-                {
-                    sgr_reset(&mut w)?;
-                }
-                erase_to_eol(&mut w)?;
+            if background_color.is_some()
+                || text_style.underline
+                || text_style.invert
+                || text_style.weight != Weight::Normal
+            {
+                sgr_reset(&mut w)?;
             }
+            erase_to_eol(&mut w)?;
             sgr_reset(&mut w)?;
         }
         Ok(())
@@ -1114,34 +1094,30 @@ mod tests {
 
         let mut expected = Vec::new();
 
-        // line 1
+        // line 1: character is written before the erase, so all 6 cells
+        // are emitted with the background, then reset + CSI K clears any
+        // leftover content past the last column.
         write!(expected, csi!("0m")).unwrap();
         write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
-        write!(expected, "     ").unwrap();
+        write!(expected, "      ").unwrap();
         write!(expected, csi!("0m")).unwrap();
         write!(expected, csi!("K")).unwrap();
-        write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
-        write!(expected, " ").unwrap();
         write!(expected, csi!("0m")).unwrap();
         write!(expected, "\r\n").unwrap();
 
         // line 2
         write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
-        write!(expected, "     ").unwrap();
+        write!(expected, "      ").unwrap();
         write!(expected, csi!("0m")).unwrap();
         write!(expected, csi!("K")).unwrap();
-        write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
-        write!(expected, " ").unwrap();
         write!(expected, csi!("0m")).unwrap();
         write!(expected, "\r\n").unwrap();
 
         // line 3
         write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
-        write!(expected, "     ").unwrap();
+        write!(expected, "      ").unwrap();
         write!(expected, csi!("0m")).unwrap();
         write!(expected, csi!("K")).unwrap();
-        write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
-        write!(expected, " ").unwrap();
         write!(expected, csi!("0m")).unwrap();
         write!(expected, "\r\n").unwrap();
 
@@ -1383,9 +1359,8 @@ mod tests {
 
         let mut expected = Vec::new();
         write!(expected, csi!("0m")).unwrap();
-        write!(expected, "123451234").unwrap();
+        write!(expected, "1234512345").unwrap();
         write!(expected, csi!("K")).unwrap();
-        write!(expected, "5").unwrap();
         write!(expected, csi!("0m")).unwrap();
         write!(expected, "\r\n").unwrap();
 
