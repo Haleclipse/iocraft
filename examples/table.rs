@@ -34,7 +34,7 @@ fn UsersTable<'a>(props: &UsersTableProps<'a>) -> impl Into<AnyElement<'a>> {
             border_color: Color::Cyan,
         ) {
             View(border_style: BorderStyle::Single, border_edges: Edges::Bottom, border_color: Color::Grey) {
-                View(width: 10pct, justify_content: JustifyContent::End, padding_right: 2) {
+                View(width: 10pct, justify_content: JustifyContent::END, padding_right: 2) {
                     Text(content: "Id", weight: Weight::Bold, decoration: TextDecoration::Underline)
                 }
 
@@ -49,7 +49,7 @@ fn UsersTable<'a>(props: &UsersTableProps<'a>) -> impl Into<AnyElement<'a>> {
 
             #(props.users.map(|users| users.iter().enumerate().map(|(i, user)| element! {
                 View(background_color: if i % 2 == 0 { None } else { Some(Color::DarkGrey) }) {
-                    View(width: 10pct, justify_content: JustifyContent::End, padding_right: 2) {
+                    View(width: 10pct, justify_content: JustifyContent::END, padding_right: 2) {
                         Text(content: user.id.to_string())
                     }
 

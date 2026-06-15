@@ -39,8 +39,8 @@ fn Example(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             border_style: BorderStyle::Double,
             border_color: Color::Blue,
             flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
+            align_items: AlignItems::CENTER,
+            justify_content: JustifyContent::CENTER,
         ) {
             View(
                 border_style: BorderStyle::Round,

@@ -118,7 +118,7 @@ fn Screen(hooks: Hooks, props: &ScreenProps) -> impl Into<AnyElement<'static>> {
                 width: 100pct,
                 background_color: theme.screen_color(),
                 padding: 1,
-                justify_content: JustifyContent::End,
+                justify_content: JustifyContent::END,
             ) {
                 Text(
                     content: &props.content,
@@ -156,8 +156,8 @@ fn CalculatorButton(props: &mut CalculatorButtonProps) -> impl Into<AnyElement<'
             ) {
                 View(
                     background_color: style.color,
-                    justify_content: JustifyContent::Center,
-                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::CENTER,
+                    align_items: AlignItems::CENTER,
                     height: 3,
                     flex_grow: 1.0,
                 ) {

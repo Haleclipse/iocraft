@@ -55,7 +55,7 @@ mod private {
 ///         View(
 ///             flex_direction: FlexDirection::Column,
 ///             padding: 2,
-///             align_items: AlignItems::Center
+///             align_items: AlignItems::CENTER
 ///         ) {
 ///             Text(content: "Use arrow keys to move. Press \"q\" to exit.")
 ///             View(
@@ -69,8 +69,8 @@ mod private {
 ///                         View(
 ///                             width: 100pct,
 ///                             height: 100pct,
-///                             justify_content: JustifyContent::Center,
-///                             align_items: AlignItems::Center,
+///                             justify_content: JustifyContent::CENTER,
+///                             align_items: AlignItems::CENTER,
 ///                         ) {
 ///                             Text(content: format!("Goodbye! {}", FACE))
 ///                         }

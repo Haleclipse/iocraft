@@ -142,8 +142,8 @@ pub fn UIRouter(mut hooks: Hooks, props: &UIRouterProps) -> impl Into<AnyElement
                     View(
                         width: 100pct,
                         height: 100pct,
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::CENTER,
+                        align_items: AlignItems::CENTER,
                         flex_direction: FlexDirection::Column,
                     ) {
                         Text(content: "Route Not Found", weight: Weight::Bold, color: Color::Red)

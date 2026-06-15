@@ -34,7 +34,7 @@ fn Example<'a>(props: &Props<'a>, mut hooks: Hooks) -> impl Into<AnyElement<'sta
         View(
             flex_direction: FlexDirection::Column,
             padding: 2,
-            align_items: AlignItems::Center
+            align_items: AlignItems::CENTER
         ) {
             Text(content: if mouse_captured.get() {
                 "Use arrow keys or mouse wheel to scroll.\nPress 'm' to disable mouse capture or 'q' to quit."

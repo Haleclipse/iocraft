@@ -117,15 +117,15 @@ fn Form(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     element! {
         View(
             flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
+            align_items: AlignItems::CENTER,
             margin: 2,
         ) {
-            View(flex_direction: FlexDirection::Column, align_items: AlignItems::Center, margin_bottom: 1) {
+            View(flex_direction: FlexDirection::Column, align_items: AlignItems::CENTER, margin_bottom: 1) {
                 Text(content: "What's your name?", color: Color::White, weight: Weight::Bold)
                 Text(content: "Tab cycles fields. Enter on Submit to exit.", color: Color::Grey)
             }
             FocusScope {
-                View(flex_direction: FlexDirection::Column, align_items: AlignItems::Center) {
+                View(flex_direction: FlexDirection::Column, align_items: AlignItems::CENTER) {
                     Field(label: "First Name".to_string(), value: first, auto_focus: true)
                     Field(label: "Last Name".to_string(), value: last)
                     Field(label: "Life Story".to_string(), value: bio)

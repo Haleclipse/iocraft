@@ -94,8 +94,8 @@ mod tests {
     async fn test_use_component_rect() {
         let actual = element!(
             View(
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
+                justify_content: JustifyContent::CENTER,
+                align_items: AlignItems::CENTER,
                 width: 40,
                 height: 50,
             ) { MyComponent }

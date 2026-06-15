@@ -472,7 +472,7 @@ mod tests {
 
         assert_eq!(
             element! {
-                View(width: 8, border_style: BorderStyle::Single, justify_content: JustifyContent::Center) {
+                View(width: 8, border_style: BorderStyle::Single, justify_content: JustifyContent::CENTER) {
                     Text(content: "✅")
                 }
             }
@@ -493,7 +493,7 @@ mod tests {
         // 2 columns. Centering in a 6-column content area: 2 pad + 2 emoji + 2 pad.
         assert_eq!(
             element! {
-                View(width: 8, border_style: BorderStyle::Single, justify_content: JustifyContent::Center) {
+                View(width: 8, border_style: BorderStyle::Single, justify_content: JustifyContent::CENTER) {
                     Text(content: "☀️")
                 }
             }
@@ -508,7 +508,7 @@ mod tests {
         // Two sun emojis: 2*2=4 columns of content in 6 columns: 1 pad each side.
         assert_eq!(
             element! {
-                View(width: 8, border_style: BorderStyle::Single, justify_content: JustifyContent::Center) {
+                View(width: 8, border_style: BorderStyle::Single, justify_content: JustifyContent::CENTER) {
                     Text(content: "☀️☀️")
                 }
             }
@@ -522,7 +522,7 @@ mod tests {
 
         assert_eq!(
             element! {
-                View(width: 12, border_style: BorderStyle::Single, justify_content: JustifyContent::Center) {
+                View(width: 12, border_style: BorderStyle::Single, justify_content: JustifyContent::CENTER) {
                     Text(content: "フーバー")
                 }
             }

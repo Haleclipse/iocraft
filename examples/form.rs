@@ -84,12 +84,12 @@ fn Form<'a>(props: &mut FormProps<'a>, mut hooks: Hooks) -> impl Into<AnyElement
         element! {
             View(
                 flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
+                align_items: AlignItems::CENTER,
                 margin: 2,
             ) {
                 View(
                     flex_direction: FlexDirection::Column,
-                    align_items: AlignItems::Center,
+                    align_items: AlignItems::CENTER,
                     margin_bottom: 1,
                 ) {
                     Text(content: "What's your name?", color: Color::White, weight: Weight::Bold)

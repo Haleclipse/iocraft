@@ -138,8 +138,8 @@ fn LoadingIndicator(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     });
     element! {
         View(
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
+            justify_content: JustifyContent::CENTER,
+            align_items: AlignItems::CENTER,
             width: 100pct,
             height: 100pct,
         ) {
@@ -166,7 +166,7 @@ fn WeatherDataView(props: &WeatherDataViewProps) -> impl Into<AnyElement<'static
                 border_style: BorderStyle::Single,
                 border_color: Color::DarkGrey,
                 border_edges: Edges::Bottom,
-                align_items: AlignItems::Center,
+                align_items: AlignItems::CENTER,
                 width: 100pct,
             ) {
                 View {
@@ -177,7 +177,7 @@ fn WeatherDataView(props: &WeatherDataViewProps) -> impl Into<AnyElement<'static
             }
             View(
                 flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
+                align_items: AlignItems::CENTER,
             ) {
                 View(padding: 1) {
                     Text(content: format!("{} {} {}", props.data.current.emoji(), props.data.current.description(), props.data.current.emoji()), color: props.data.current.color())
@@ -255,8 +255,8 @@ fn Weather(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     WeatherState::Loaded(Err(err)) => element! {
                         View(
                             flex_direction: FlexDirection::Column,
-                            justify_content: JustifyContent::Center,
-                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::CENTER,
+                            align_items: AlignItems::CENTER,
                             width: 100pct,
                             height: 100pct,
                             padding: 2,

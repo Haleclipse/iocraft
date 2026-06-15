@@ -408,7 +408,7 @@ pub fn ScrollView<'a>(
                         flex_grow: 1.0,
                         height: 100pct,
                         flex_direction: FlexDirection::Column,
-                        justify_content: JustifyContent::FlexEnd,
+                        justify_content: JustifyContent::FLEX_END,
                     ) {
                         ScrollViewContentMeasurer(
                             content_height_ref: Some(content_height_ref),
@@ -432,7 +432,7 @@ pub fn ScrollView<'a>(
                     width: 100pct,
                     height: 100pct,
                     flex_direction: FlexDirection::Column,
-                    justify_content: JustifyContent::FlexEnd,
+                    justify_content: JustifyContent::FLEX_END,
                 ) {
                     ScrollViewContentMeasurer(
                         content_height_ref: Some(content_height_ref),
