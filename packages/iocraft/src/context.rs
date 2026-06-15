@@ -1,5 +1,5 @@
 use core::{
-    any::Any,
+    any::{Any, TypeId},
     cell::{Ref, RefCell, RefMut},
     mem,
 };
@@ -120,6 +120,14 @@ impl<'a> Context<'a> {
         }
     }
 
+    fn value_type_id(&self) -> TypeId {
+        match self {
+            Context::Mut(context) => (&**context as &dyn Any).type_id(),
+            Context::Ref(context) => (&**context as &dyn Any).type_id(),
+            Context::Owned(context) => (&**context as &dyn Any).type_id(),
+        }
+    }
+
     #[doc(hidden)]
     pub fn borrow(&mut self) -> Context<'_> {
         match self {
@@ -132,13 +140,14 @@ impl<'a> Context<'a> {
 
 #[doc(hidden)]
 pub struct ContextStack<'a> {
-    contexts: Vec<RefCell<Context<'a>>>,
+    contexts: Vec<(TypeId, RefCell<Context<'a>>)>,
 }
 
 impl<'a> ContextStack<'a> {
     pub(crate) fn root(root_context: &'a mut (dyn Any + Send + Sync)) -> Self {
+        let type_id = (&*root_context as &dyn Any).type_id();
         Self {
-            contexts: vec![RefCell::new(Context::Mut(root_context))],
+            contexts: vec![(type_id, RefCell::new(Context::Mut(root_context)))],
         }
     }
 
@@ -152,9 +161,12 @@ impl<'a> ContextStack<'a> {
             //
             // This is only safe because we don't allow any other changes to the stack, and we
             // revert the stack right after the call.
+            let type_id = context.value_type_id();
             let shorter_lived_self =
                 unsafe { mem::transmute::<&mut Self, &mut ContextStack<'b>>(self) };
-            shorter_lived_self.contexts.push(RefCell::new(context));
+            shorter_lived_self
+                .contexts
+                .push((type_id, RefCell::new(context)));
             f(shorter_lived_self);
             shorter_lived_self.contexts.pop();
         } else {
@@ -163,25 +175,66 @@ impl<'a> ContextStack<'a> {
     }
 
     pub fn get_context<T: Any>(&self) -> Option<Ref<'_, T>> {
-        for context in self.contexts.iter().rev() {
-            if let Ok(context) = context.try_borrow() {
-                if let Ok(ret) = Ref::filter_map(context, |context| context.downcast_ref::<T>()) {
-                    return Some(ret);
-                }
+        for (type_id, context) in self.contexts.iter().rev() {
+            if *type_id != TypeId::of::<T>() {
+                continue;
+            }
+            let Ok(context) = context.try_borrow() else {
+                return None;
+            };
+            if let Ok(ret) = Ref::filter_map(context, |context| context.downcast_ref::<T>()) {
+                return Some(ret);
             }
         }
         None
     }
 
     pub fn get_context_mut<T: Any>(&self) -> Option<RefMut<'_, T>> {
-        for context in self.contexts.iter().rev() {
-            if let Ok(context) = context.try_borrow_mut() {
-                if let Ok(ret) = RefMut::filter_map(context, |context| context.downcast_mut::<T>())
-                {
-                    return Some(ret);
-                }
+        for (type_id, context) in self.contexts.iter().rev() {
+            if *type_id != TypeId::of::<T>() {
+                continue;
+            }
+            let Ok(context) = context.try_borrow_mut() else {
+                return None;
+            };
+            if let Ok(ret) = RefMut::filter_map(context, |context| context.downcast_mut::<T>()) {
+                return Some(ret);
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_value_type_id_tracks_wrapped_type() {
+        let by_ref = String::from("ref");
+        let mut by_mut = String::from("mut");
+        assert_eq!(
+            Context::from_ref(&by_ref).value_type_id(),
+            TypeId::of::<String>()
+        );
+        assert_eq!(
+            Context::from_mut(&mut by_mut).value_type_id(),
+            TypeId::of::<String>()
+        );
+        assert_eq!(
+            Context::owned(String::from("owned")).value_type_id(),
+            TypeId::of::<String>()
+        );
+    }
+
+    #[test]
+    fn borrowed_inner_context_does_not_fall_back_to_outer_same_type() {
+        let mut outer = String::from("outer");
+        let mut inner = String::from("inner");
+        let mut stack = ContextStack::root(&mut outer);
+        stack.with_context(Some(Context::from_mut(&mut inner)), |stack| {
+            let _inner_borrow = stack.get_context_mut::<String>().unwrap();
+            assert!(stack.get_context::<String>().is_none());
+        });
     }
 }

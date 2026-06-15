@@ -76,7 +76,7 @@ mod tests {
 
     #[component]
     fn MyComponent(hooks: Hooks) -> impl Into<AnyElement<'static>> {
-        let s = hooks.use_context::<StringContext>();
+        let text = hooks.use_context::<StringContext>().0.clone();
 
         let _ = hooks.use_context_mut::<StringContext>();
 
@@ -89,7 +89,7 @@ mod tests {
             .expect("mutable context not found");
 
         element! {
-            Text(content: &s.0)
+            Text(content: text)
         }
     }
 
