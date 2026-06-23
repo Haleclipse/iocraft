@@ -4,12 +4,22 @@ use core::{
     mem,
 };
 
+/// Per-frame alternate-screen request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AlternateScreenRequest {
+    pub mouse_tracking: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ExitOnCtrlCContext(pub bool);
+
 /// The system context, which is always available to all components.
 pub struct SystemContext {
     should_exit: bool,
     mouse_capture: Option<bool>,
     keyboard_enhancement_flags: Option<crate::KeyboardEnhancementFlags>,
     terminal_title: Option<String>,
+    alternate_screen: Option<AlternateScreenRequest>,
 }
 
 impl SystemContext {
@@ -19,6 +29,7 @@ impl SystemContext {
             mouse_capture: None,
             keyboard_enhancement_flags: None,
             terminal_title: None,
+            alternate_screen: None,
         }
     }
 
@@ -30,6 +41,25 @@ impl SystemContext {
 
     pub(crate) fn should_exit(&self) -> bool {
         self.should_exit
+    }
+
+    pub(crate) fn begin_render_frame(&mut self) {
+        self.alternate_screen = None;
+    }
+
+    /// Requests that the current render tree run inside the terminal's alternate screen.
+    ///
+    /// This is a per-frame request: components such as
+    /// [`AlternateScreen`](crate::components::AlternateScreen) call it every render while
+    /// mounted. When no component requests alternate-screen mode during a frame, an inline
+    /// render loop exits any dynamically-entered alternate screen before painting the new
+    /// frame back on the main screen.
+    pub fn request_alternate_screen(&mut self, mouse_tracking: bool) {
+        self.alternate_screen = Some(AlternateScreenRequest { mouse_tracking });
+    }
+
+    pub(crate) fn alternate_screen_request(&self) -> Option<AlternateScreenRequest> {
+        self.alternate_screen
     }
 
     /// Toggles mouse capture on the terminal. If called from a component that is being dynamically

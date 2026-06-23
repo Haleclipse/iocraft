@@ -203,9 +203,18 @@ impl InstantiatedComponent {
             self.component.draw(drawer);
         }
 
-        drawer.with_clip_rect_for_children(|drawer| {
-            self.children.draw(drawer);
-        });
+        if !drawer.take_skip_children() {
+            drawer.with_clip_rect_for_children(|drawer| {
+                self.children.draw(drawer);
+            });
+        }
+
+        // CC Ink applies noSelect ops after writes/blits but before its
+        // post-render selection/search overlay pass. Replay deferred noSelect
+        // metadata here so post-draw hooks observe the current final bitmap;
+        // keep the ops queued so later sibling blits can be repaired again
+        // before ancestor/root overlay hooks run.
+        drawer.replay_deferred_no_select();
 
         if self.has_transparent_layout {
             if let Some(child) = self.children.components.iter().next().as_ref() {

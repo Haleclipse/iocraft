@@ -1,9 +1,10 @@
 use crate::{
     any_key::AnyKey,
     component::{Component, ComponentHelper, ComponentHelperExt},
-    mock_terminal_render_loop,
+    mock_terminal_render_loop, mock_terminal_render_loop_with_profile,
     props::AnyProps,
-    render, terminal_render_loop, Canvas, MockTerminalConfig, Terminal,
+    render, terminal_render_loop, Canvas, FrameProfileCallback, MockTerminalConfig,
+    RenderFrameProfile, Terminal, TextMatchPosition,
 };
 use crossterm::terminal;
 use futures::Stream;
@@ -153,6 +154,29 @@ mod private {
 }
 
 /// A trait implemented by all element types, providing methods for common operations on them.
+/// Result of rendering an element into an isolated retained screen buffer.
+///
+/// This is the Rust counterpart to the CC Ink fork's `render-to-screen.ts`:
+/// callers can render a subtree off-terminal at a fixed width, inspect its
+/// natural height, and scan the retained [`Canvas`] for exact terminal-cell
+/// match coordinates. It is mode-neutral and does not enter fullscreen or write
+/// to the terminal.
+#[derive(Clone)]
+pub struct RenderedScreen {
+    /// Rendered retained canvas.
+    pub canvas: Canvas,
+    /// Natural rendered height in rows.
+    pub height: usize,
+}
+
+impl RenderedScreen {
+    /// Scans this screen for a query, returning terminal-cell match positions.
+    pub fn scan_positions(&self, query: &str) -> Vec<TextMatchPosition> {
+        self.canvas.scan_text_positions(query)
+    }
+}
+
+/// Common operations available on iocraft elements.
 pub trait ElementExt: private::Sealed + Sized {
     /// Returns the key of the element.
     fn key(&self) -> &ElementKey;
@@ -165,6 +189,25 @@ pub trait ElementExt: private::Sealed + Sized {
 
     /// Renders the element into a canvas.
     fn render(&mut self, max_width: Option<usize>) -> Canvas;
+
+    /// Renders the element into an isolated retained screen buffer at a fixed width.
+    ///
+    /// This mirrors CC Ink's `renderToScreen(el, width)` helper used for
+    /// side-rendered search/highlight calculations. Unlike [`Self::render_loop`]
+    /// or [`Self::fullscreen`], it is a pure off-terminal render: no terminal
+    /// modes are changed, no events are wired, and fullscreen-only capabilities
+    /// such as mouse selection are inactive.
+    fn render_to_screen(&mut self, width: usize) -> RenderedScreen {
+        let mut canvas = self.render(Some(width));
+        let height = canvas.height();
+        if height == 0 {
+            // CC Ink's render-to-screen.ts returns the natural Yoga height but
+            // allocates at least one screen row so downstream scanners have a
+            // valid retained buffer even for empty elements.
+            canvas = Canvas::new(width, 1);
+        }
+        RenderedScreen { canvas, height }
+    }
 
     /// Renders the element into a string.
     ///
@@ -270,6 +313,22 @@ pub trait ElementExt: private::Sealed + Sized {
         mock_terminal_render_loop(self, config)
     }
 
+    /// Renders the element in a mock terminal and reports per-frame profile data.
+    ///
+    /// This is useful for deterministic benchmarks and regression tests: it uses
+    /// the same profile event shape as [`RenderLoopFuture::on_frame_profile`]
+    /// without requiring a real TTY.
+    fn mock_terminal_render_loop_with_profile<'a, F>(
+        &'a mut self,
+        config: MockTerminalConfig,
+        callback: F,
+    ) -> impl Stream<Item = Canvas> + 'a
+    where
+        F: FnMut(RenderFrameProfile) + Send + 'a,
+    {
+        mock_terminal_render_loop_with_profile(self, config, Some(Box::new(callback)))
+    }
+
     /// Renders the element as fullscreen in a loop, allowing it to be dynamic and interactive.
     ///
     /// This method should only be used when stdio is a TTY terminal. If for example, stdout is a
@@ -302,17 +361,22 @@ enum RenderLoopFutureState<'a, E: ElementExt> {
         fullscreen: bool,
         mouse_capture: Option<bool>,
         ignore_ctrl_c: bool,
+        suspend_on_ctrl_z: bool,
         output: Output,
         stdout_writer: Option<Box<dyn Write + Send + 'a>>,
         stderr_writer: Option<Box<dyn Write + Send + 'a>>,
         throttle: Option<std::time::Duration>,
+        frame_profile: Option<FrameProfileCallback<'a>>,
         element: &'a mut E,
     },
     Running(Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>),
 }
 
-/// The default render-loop frame interval (~60fps).
-const DEFAULT_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_micros(16_667);
+/// The shared default render-loop frame interval.
+///
+/// This mirrors CC Ink's exported `FRAME_INTERVAL_MS = 16` constant, used for
+/// render throttling and animation pacing (~60fps).
+pub const FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// A future that renders an element in a loop, allowing it to be dynamic and interactive.
 ///
@@ -330,10 +394,12 @@ impl<'a, E: ElementExt + 'a> RenderLoopFuture<'a, E> {
                 fullscreen: false,
                 mouse_capture: None,
                 ignore_ctrl_c: false,
+                suspend_on_ctrl_z: false,
                 output: Output::default(),
                 stdout_writer: None,
                 stderr_writer: None,
-                throttle: Some(DEFAULT_FRAME_INTERVAL),
+                throttle: Some(FRAME_INTERVAL),
+                frame_profile: None,
                 element,
             },
         }
@@ -366,6 +432,25 @@ impl<'a, E: ElementExt + 'a> RenderLoopFuture<'a, E> {
                 *throttle = None;
             }
             _ => panic!("without_throttle() must be called before polling the future"),
+        }
+        self
+    }
+
+    /// Registers a callback that receives per-frame render-loop profiling data.
+    ///
+    /// This is an opt-in benchmarking/debugging hook inspired by CC Ink's
+    /// `onFrame` event. It reports update/layout/draw/write timings plus
+    /// repaint metadata without changing rendering behavior or writing logs by
+    /// itself.
+    pub fn on_frame_profile<F>(mut self, callback: F) -> Self
+    where
+        F: FnMut(RenderFrameProfile) + Send + 'a,
+    {
+        match &mut self.state {
+            RenderLoopFutureState::Init { frame_profile, .. } => {
+                *frame_profile = Some(Box::new(callback));
+            }
+            _ => panic!("on_frame_profile() must be called before polling the future"),
         }
         self
     }
@@ -419,6 +504,24 @@ impl<'a, E: ElementExt + 'a> RenderLoopFuture<'a, E> {
                 *ignore_ctrl_c = true;
             }
             _ => panic!("ignore_ctrl_c() must be called before polling the future"),
+        }
+        self
+    }
+
+    /// Enables CC Ink/Claude Code-style Ctrl+Z suspension on Unix.
+    ///
+    /// This is intentionally opt-in: generic iocraft apps receive Ctrl+Z as
+    /// ordinary input by default. When enabled, Ctrl+Z hands the terminal back
+    /// to the shell, suspends the process, and forces a full terminal repair and
+    /// repaint after the process is foregrounded with `fg`.
+    pub fn suspend_on_ctrl_z(mut self) -> Self {
+        match &mut self.state {
+            RenderLoopFutureState::Init {
+                suspend_on_ctrl_z, ..
+            } => {
+                *suspend_on_ctrl_z = true;
+            }
+            _ => panic!("suspend_on_ctrl_z() must be called before polling the future"),
         }
         self
     }
@@ -502,29 +605,35 @@ impl<'a, E: ElementExt + Send + 'a> Future for RenderLoopFuture<'a, E> {
                         fullscreen,
                         mouse_capture,
                         ignore_ctrl_c,
+                        suspend_on_ctrl_z,
                         output,
                         stdout_writer,
                         stderr_writer,
                         throttle,
+                        frame_profile,
                         element,
                     ) = match std::mem::replace(&mut self.state, RenderLoopFutureState::Empty) {
                         RenderLoopFutureState::Init {
                             fullscreen,
                             mouse_capture,
                             ignore_ctrl_c,
+                            suspend_on_ctrl_z,
                             output,
                             stdout_writer,
                             stderr_writer,
                             throttle,
+                            frame_profile,
                             element,
                         } => (
                             fullscreen,
                             mouse_capture,
                             ignore_ctrl_c,
+                            suspend_on_ctrl_z,
                             output,
                             stdout_writer,
                             stderr_writer,
                             throttle,
+                            frame_profile,
                             element,
                         ),
                         _ => unreachable!(),
@@ -553,7 +662,15 @@ impl<'a, E: ElementExt + Send + 'a> Future for RenderLoopFuture<'a, E> {
                     if ignore_ctrl_c {
                         terminal.ignore_ctrl_c();
                     }
-                    let fut = Box::pin(terminal_render_loop(element, terminal, throttle));
+                    if suspend_on_ctrl_z {
+                        terminal.suspend_on_ctrl_z();
+                    }
+                    let fut = Box::pin(terminal_render_loop(
+                        element,
+                        terminal,
+                        throttle,
+                        frame_profile,
+                    ));
                     self.state = RenderLoopFutureState::Running(fut);
                 }
                 RenderLoopFutureState::Running(fut) => {
@@ -689,8 +806,40 @@ mod tests {
     }
 
     #[test]
+    fn test_render_to_screen_matches_cc_ink_side_render_helper() {
+        let mut element = element! {
+            View(flex_direction: FlexDirection::Column) {
+                Text(content: "alpha")
+                Text(content: "lazy 中c")
+            }
+        };
+        let screen = element.render_to_screen(12);
+
+        assert_eq!(screen.canvas.width(), 12);
+        assert_eq!(screen.height, screen.canvas.height());
+        assert_eq!(screen.canvas.to_string(), "alpha\nlazy 中c\n");
+        assert_eq!(
+            screen.scan_positions("中c"),
+            vec![TextMatchPosition {
+                row: 1,
+                col: 5,
+                len: 3,
+            }]
+        );
+
+        let mut empty = element!(Text);
+        let empty_screen = empty.render_to_screen(12);
+        assert_eq!(empty_screen.height, 0);
+        assert_eq!(empty_screen.canvas.width(), 12);
+        assert_eq!(empty_screen.canvas.height(), 1);
+        assert!(empty_screen.scan_positions("anything").is_empty());
+    }
+
+    #[test]
     fn test_render_loop_future() {
         fn assert_send<F: Future + Send>(_f: F) {}
+
+        assert_eq!(FRAME_INTERVAL, std::time::Duration::from_millis(16));
 
         let mut element = element!(View);
         let render_loop_future = element.render_loop();
