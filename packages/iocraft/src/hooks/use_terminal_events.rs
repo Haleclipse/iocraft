@@ -141,6 +141,19 @@ pub trait UseTerminalEvents: private::Sealed {
         F: FnMut(&PropagatedTerminalEvent) + Send + 'static;
 }
 
+pub(crate) trait UseTerminalDefaultEvents: private::Sealed {
+    /// Defines a framework default-action callback.
+    ///
+    /// Unlike propagation-aware component listeners, default-action callbacks
+    /// still observe events after `stop_propagation()` so they can mirror DOM
+    /// behavior: propagation and default prevention are independent, and only
+    /// `prevent_default()` should block built-in defaults such as FocusScope Tab
+    /// traversal.
+    fn use_terminal_default_events<F>(&mut self, f: F)
+    where
+        F: FnMut(&PropagatedTerminalEvent) + Send + 'static;
+}
+
 impl UseTerminalEvents for Hooks<'_, '_> {
     fn use_terminal_events<F>(&mut self, mut f: F)
     where
@@ -151,6 +164,7 @@ impl UseTerminalEvents for Hooks<'_, '_> {
             component_location: Default::default(),
             in_component: false,
             propagation_aware: false,
+            observe_stopped: false,
             f: None,
         });
         h.f = Some(Box::new(move |event: &PropagatedTerminalEvent| {
@@ -167,6 +181,7 @@ impl UseTerminalEvents for Hooks<'_, '_> {
             component_location: Default::default(),
             in_component: true,
             propagation_aware: false,
+            observe_stopped: false,
             f: None,
         });
         h.f = Some(Box::new(move |event: &PropagatedTerminalEvent| {
@@ -183,6 +198,7 @@ impl UseTerminalEvents for Hooks<'_, '_> {
             component_location: Default::default(),
             in_component: true,
             propagation_aware: true,
+            observe_stopped: false,
             f: None,
         });
         h.f = Some(Box::new(f));
@@ -197,6 +213,24 @@ impl UseTerminalEvents for Hooks<'_, '_> {
             component_location: Default::default(),
             in_component: false,
             propagation_aware: true,
+            observe_stopped: false,
+            f: None,
+        });
+        h.f = Some(Box::new(f));
+    }
+}
+
+impl UseTerminalDefaultEvents for Hooks<'_, '_> {
+    fn use_terminal_default_events<F>(&mut self, f: F)
+    where
+        F: FnMut(&PropagatedTerminalEvent) + Send + 'static,
+    {
+        let h = self.use_hook(move || UseTerminalEventsImpl {
+            events: None,
+            component_location: Default::default(),
+            in_component: false,
+            propagation_aware: true,
+            observe_stopped: true,
             f: None,
         });
         h.f = Some(Box::new(f));
@@ -210,6 +244,7 @@ struct UseTerminalEventsImpl {
     component_location: (Point<i16>, Size<u16>),
     in_component: bool,
     propagation_aware: bool,
+    observe_stopped: bool,
     f: Option<EventCallback>,
 }
 
@@ -231,7 +266,10 @@ impl Hook for UseTerminalEventsImpl {
             );
             // Propagation-aware subscribers skip events already consumed by an
             // earlier (deeper) subscriber. Plain subscribers observe everything.
-            if self.propagation_aware && state.is_propagation_stopped() {
+            if self.propagation_aware
+                && ((!self.observe_stopped && state.is_propagation_stopped())
+                    || (self.observe_stopped && state.is_default_propagation_stopped()))
+            {
                 continue;
             }
             if self.in_component {
@@ -255,7 +293,12 @@ impl Hook for UseTerminalEventsImpl {
                             }
                         }
                     }
-                    TerminalEvent::Key(_) | TerminalEvent::Resize(..) | TerminalEvent::Paste(_) => {
+                    TerminalEvent::Key(_)
+                    | TerminalEvent::Resize(..)
+                    | TerminalEvent::FocusGained
+                    | TerminalEvent::FocusLost
+                    | TerminalEvent::Paste(_)
+                    | TerminalEvent::Response(_) => {
                         if let Some(f) = &mut self.f {
                             f(&PropagatedTerminalEvent::new(event, state));
                         }
