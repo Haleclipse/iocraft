@@ -1172,6 +1172,9 @@ impl<'a> Tree<'a> {
                     .unwrap()
             })
             .unwrap_or(false);
+        let terminal_layout_height = terminal
+            .as_ref()
+            .and_then(|term| term.size().map(|(_, rows)| rows as usize));
         let fullscreen_size = terminal.as_ref().and_then(|term| {
             if term.is_fullscreen() {
                 term.size()
@@ -1210,6 +1213,15 @@ impl<'a> Tree<'a> {
                         .unwrap_or(AvailableSpace::MaxContent),
                     height: fullscreen_size
                         .map(|(_, rows)| AvailableSpace::Definite(rows as _))
+                        .or_else(|| {
+                            // CC Ink keeps terminalRows as the main-screen
+                            // viewport while native scrollback still uses the
+                            // rendered Yoga height. In iocraft/Taffy, supplying
+                            // a definite terminal-height constraint keeps
+                            // percentage/flex measurements stable without
+                            // clamping canvas height outside alt-screen mode.
+                            terminal_layout_height.map(|rows| AvailableSpace::Definite(rows as _))
+                        })
                         .unwrap_or(AvailableSpace::MaxContent),
                 },
                 |known_dimensions, available_space, _node_id, node_context, style| {

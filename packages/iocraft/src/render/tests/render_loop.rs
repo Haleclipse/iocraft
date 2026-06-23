@@ -171,6 +171,63 @@ async fn test_resize_event_repaints_unchanged_canvas() {
     assert_eq!(actual, vec!["static\n", "static\n"]);
 }
 
+#[derive(Default, Props)]
+struct AvailableHeightProbeProps;
+
+#[derive(Default)]
+struct AvailableHeightProbe;
+
+impl Component for AvailableHeightProbe {
+    type Props<'a> = AvailableHeightProbeProps;
+
+    fn new(_props: &Self::Props<'_>) -> Self {
+        Self
+    }
+
+    fn update(
+        &mut self,
+        _props: &mut Self::Props<'_>,
+        _hooks: Hooks,
+        updater: &mut ComponentUpdater,
+    ) {
+        updater.set_measure_func(Box::new(|_, available, _| {
+            let width = match available.height {
+                taffy::AvailableSpace::Definite(_) => 8.0,
+                _ => 3.0,
+            };
+            taffy::Size { width, height: 1.0 }
+        }));
+    }
+
+    fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {
+        let content = if drawer.size().width >= 8 {
+            "definite"
+        } else {
+            "max"
+        };
+        drawer
+            .canvas()
+            .set_text(0, 0, content, CanvasTextStyle::default());
+    }
+}
+
+#[component]
+fn AvailableHeightApp(hooks: Hooks) -> impl Into<AnyElement<'static>> {
+    hooks.use_context_mut::<SystemContext>().exit();
+    element!(AvailableHeightProbe)
+}
+
+#[apply(test!)]
+async fn test_main_screen_layout_receives_terminal_height_without_clamping_canvas() {
+    let canvases: Vec<_> = element!(AvailableHeightApp)
+        .mock_terminal_render_loop(MockTerminalConfig::default().with_size(20, 7))
+        .collect()
+        .await;
+
+    assert_eq!(canvases.len(), 1);
+    assert_eq!(canvases[0].to_string().lines().next(), Some("definite"));
+}
+
 #[component]
 fn TallStaticComponent(hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let mut system = hooks.use_context_mut::<SystemContext>();
