@@ -1423,7 +1423,7 @@ impl<'a> Tree<'a> {
                         } else {
                             prev_canvas.as_ref()
                         };
-                    term.write_canvas(prev, &output.canvas)?;
+                    term.write_canvas_after_repaint_check(prev, &output.canvas)?;
                     // Position (or hide) the physical cursor after the frame has been
                     // committed, so IMEs and screen readers can anchor to the caret of
                     // a focused text input.

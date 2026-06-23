@@ -107,6 +107,7 @@ pub(super) trait TerminalImpl: Write + Send {
     fn clear_terminal(&mut self) -> io::Result<()> {
         self.clear_canvas()
     }
+    #[cfg_attr(not(test), allow(dead_code))]
     fn write_canvas_would_write(&self, _prev: Option<&Canvas>, _canvas: &Canvas) -> bool {
         true
     }

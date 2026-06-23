@@ -399,10 +399,25 @@ impl<'a> Terminal<'a> {
         self.inner.clear_terminal()
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn write_canvas(&mut self, prev: Option<&Canvas>, canvas: &Canvas) -> io::Result<()> {
         if self.inner.write_canvas_would_write(prev, canvas) {
             self.ensure_synchronized_update_started()?;
         }
+        let decstbm_safe = self.synchronized_update_supported && self.synchronized_update_started;
+        self.inner.set_decstbm_safe(decstbm_safe);
+        self.inner.write_canvas(prev, canvas)
+    }
+
+    pub(crate) fn write_canvas_after_repaint_check(
+        &mut self,
+        prev: Option<&Canvas>,
+        canvas: &Canvas,
+    ) -> io::Result<()> {
+        // The render loop has already classified this frame as a repaint. Avoid
+        // running the terminal backend's preflight row scan only to repeat the
+        // same retained-canvas scan inside write_canvas().
+        self.ensure_synchronized_update_started()?;
         let decstbm_safe = self.synchronized_update_supported && self.synchronized_update_started;
         self.inner.set_decstbm_safe(decstbm_safe);
         self.inner.write_canvas(prev, canvas)
