@@ -40,8 +40,8 @@ pub trait UseFocus: private::Sealed {
     fn use_focus(&mut self, opts: FocusOptions) -> FocusHandle;
 }
 
-/// `UseFocusManager` exposes the imperative side of focus control: enable/disable traversal,
-/// jump to next/previous focusable, or directly focus a specific id.
+/// `UseFocusManager` exposes the imperative side of focus control: enable/disable focus
+/// mutation, jump to next/previous focusable, or directly focus a specific id.
 pub trait UseFocusManager: private::Sealed {
     /// Returns a [`FocusManager`] for the nearest enclosing [`FocusScope`](crate::components::FocusScope).
     ///

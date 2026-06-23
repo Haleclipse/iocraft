@@ -10,6 +10,8 @@ use crate::hooks::{Ref, State, UseRef, UseState};
 use crate::{ComponentUpdater, Hook};
 use std::collections::HashMap;
 
+const MAX_FOCUS_STACK: usize = 32;
+
 /// A unique identifier for a focusable element within a single [`FocusScope`].
 ///
 /// `FocusId`s are allocated by the enclosing scope and are only meaningful within that scope.
@@ -31,8 +33,9 @@ impl FocusId {
 /// Options for registering a focusable element via [`UseFocus::use_focus`](crate::hooks::UseFocus::use_focus).
 #[derive(Debug, Clone, Copy)]
 pub struct FocusOptions {
-    /// If `true`, this element requests focus on first mount when no other element currently
-    /// holds focus. Only the first auto-focusing element wins; subsequent ones are ignored.
+    /// If `true`, this element requests focus on first mount. Like CC Ink's
+    /// `autoFocus`, later auto-focusing elements can replace earlier focus
+    /// during mount, and disabled focus managers ignore the request.
     pub auto_focus: bool,
 
     /// If `false`, this element keeps its slot in the focus order but is skipped during
@@ -75,6 +78,17 @@ impl FocusOptions {
 struct FocusEntry {
     id: FocusId,
     is_active: bool,
+    is_tabbable: bool,
+    parent: Option<FocusId>,
+}
+
+/// Description of the most recent focus transition in a [`FocusScope`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FocusChange {
+    /// Element that previously held focus, if any.
+    pub previous: Option<FocusId>,
+    /// Element that currently holds focus, if any.
+    pub current: Option<FocusId>,
 }
 
 /// The mutable state owned by a single [`FocusScope`].
@@ -85,6 +99,8 @@ struct FocusEntry {
 pub struct FocusState {
     entries: Vec<FocusEntry>,
     active: Option<FocusId>,
+    focus_stack: Vec<FocusId>,
+    last_focus_change: Option<FocusChange>,
     enabled: bool,
     next_id: u64,
 }
@@ -94,6 +110,8 @@ impl Default for FocusState {
         Self {
             entries: Vec::new(),
             active: None,
+            focus_stack: Vec::new(),
+            last_focus_change: None,
             enabled: true,
             next_id: 0,
         }
@@ -107,28 +125,93 @@ impl FocusState {
         id
     }
 
+    fn push_focus_stack(&mut self, id: FocusId) {
+        if let Some(idx) = self
+            .focus_stack
+            .iter()
+            .position(|candidate| *candidate == id)
+        {
+            self.focus_stack.remove(idx);
+        }
+        self.focus_stack.push(id);
+        if self.focus_stack.len() > MAX_FOCUS_STACK {
+            self.focus_stack.remove(0);
+        }
+    }
+
+    fn purge_focus_stack(&mut self) {
+        let entries = &self.entries;
+        self.focus_stack.retain(|id| {
+            entries
+                .iter()
+                .any(|entry| entry.id == *id && entry.is_active)
+        });
+    }
+
+    fn restore_focus_from_stack(&mut self) -> Option<FocusId> {
+        self.purge_focus_stack();
+        while let Some(candidate) = self.focus_stack.pop() {
+            if self
+                .entries
+                .iter()
+                .any(|entry| entry.id == candidate && entry.is_active)
+            {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn set_active(&mut self, active: Option<FocusId>) {
+        self.set_active_with_stack(active, true);
+    }
+
+    fn set_active_without_stack(&mut self, active: Option<FocusId>) {
+        self.set_active_with_stack(active, false);
+    }
+
+    fn set_active_with_stack(&mut self, active: Option<FocusId>, push_previous: bool) {
+        if self.active != active {
+            let previous = self.active;
+            if push_previous {
+                if let Some(previous) = previous {
+                    self.push_focus_stack(previous);
+                }
+            }
+            self.active = active;
+            self.last_focus_change = Some(FocusChange {
+                previous,
+                current: active,
+            });
+        }
+    }
+
     fn register(&mut self, auto_focus: bool, is_active: bool) -> FocusId {
         let id = self.alloc_id();
-        self.entries.push(FocusEntry { id, is_active });
-        if auto_focus && is_active && self.active.is_none() {
-            self.active = Some(id);
+        self.entries.push(FocusEntry {
+            id,
+            is_active,
+            is_tabbable: is_active,
+            parent: None,
+        });
+        if auto_focus && is_active && self.enabled {
+            self.set_active(Some(id));
         }
         id
     }
 
     fn unregister(&mut self, id: FocusId) {
         let was_active = self.active == Some(id);
-        let removed_idx = self.entries.iter().position(|e| e.id == id);
+        let removed = self.entries.iter().any(|e| e.id == id);
         self.entries.retain(|e| e.id != id);
-        // Also drop the id from the in-flight render order if it's there.
-        if let Some(removed_idx) = removed_idx {
-            if was_active {
-                // Continue forward from the slot the removed entry used to occupy.
-                // After `retain`, that slot is now occupied by what was the *next* entry,
-                // so `find_next_from_index(removed_idx)` walks the post-removal list in
-                // the same direction `set_entry_active` would have used.
-                self.active = self.find_next_from_index(removed_idx);
-            }
+        self.focus_stack.retain(|candidate| *candidate != id);
+        self.purge_focus_stack();
+        if removed && was_active {
+            // CC Ink's FocusManager restores the most recently focused still-mounted
+            // element from its focus stack when the active node is removed. It does
+            // not fall through to the next tabbable sibling just because one exists.
+            let restored = self.restore_focus_from_stack();
+            self.set_active_without_stack(restored);
         }
     }
 
@@ -141,14 +224,34 @@ impl FocusState {
             }
         }
         if changed && !is_active && self.active == Some(id) {
-            // Move forward to the next still-active focusable, wrapping around.
-            self.active = self.find_next(Some(id));
+            // Deactivation is an iocraft extension (CC Ink's focus manager only
+            // models mounted DOM nodes). Keep the existing traversal fallback, but
+            // don't push the now-inactive id onto the restore stack.
+            self.set_active_without_stack(self.find_next(Some(id)));
+        }
+    }
+
+    fn set_entry_tabbable(&mut self, id: FocusId, is_tabbable: bool) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+            entry.is_tabbable = is_tabbable;
+        }
+    }
+
+    fn set_entry_parent(&mut self, id: FocusId, parent: Option<FocusId>) {
+        if parent == Some(id) {
+            return;
+        }
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+            entry.parent = parent;
         }
     }
 
     fn focus(&mut self, id: FocusId) {
+        if !self.enabled {
+            return;
+        }
         if self.entries.iter().any(|e| e.id == id && e.is_active) {
-            self.active = Some(id);
+            self.set_active(Some(id));
         }
     }
 
@@ -163,7 +266,7 @@ impl FocusState {
         let start_idx = start_idx % len;
         for i in 0..len {
             let idx = (start_idx + i) % len;
-            if self.entries[idx].is_active {
+            if self.entries[idx].is_active && self.entries[idx].is_tabbable {
                 return Some(self.entries[idx].id);
             }
         }
@@ -199,11 +302,18 @@ impl FocusState {
         };
         for i in 1..=len {
             let idx = (start_idx + len - i) % len;
-            if self.entries[idx].is_active {
+            if self.entries[idx].is_active && self.entries[idx].is_tabbable {
                 return Some(self.entries[idx].id);
             }
         }
         None
+    }
+
+    fn parent_of(&self, id: FocusId) -> Option<FocusId> {
+        self.entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .and_then(|entry| entry.parent)
     }
 
     fn focus_next(&mut self) {
@@ -211,7 +321,7 @@ impl FocusState {
             return;
         }
         if let Some(id) = self.find_next(self.active) {
-            self.active = Some(id);
+            self.set_active(Some(id));
         }
     }
 
@@ -220,7 +330,7 @@ impl FocusState {
             return;
         }
         if let Some(id) = self.find_prev(self.active) {
-            self.active = Some(id);
+            self.set_active(Some(id));
         }
     }
 
@@ -366,6 +476,17 @@ impl FocusContext {
         self.with_mut(|s| s.set_entry_active(id, is_active));
     }
 
+    pub(crate) fn set_entry_tabbable(&self, id: FocusId, is_tabbable: bool) {
+        self.with_mut(|s| s.set_entry_tabbable(id, is_tabbable));
+    }
+
+    pub(crate) fn set_entry_parent(&self, id: FocusId, parent: Option<FocusId>) {
+        if parent == Some(id) || self.with_ref(|s| s.parent_of(id) == parent) == Some(true) {
+            return;
+        }
+        self.with_mut(|s| s.set_entry_parent(id, parent));
+    }
+
     /// Returns `true` if the given id currently holds focus in this scope.
     pub fn is_focused(&self, id: FocusId) -> bool {
         self.with_ref(|s| s.active == Some(id)).unwrap_or(false)
@@ -374,6 +495,11 @@ impl FocusContext {
     /// The id that currently holds focus in this scope, if any.
     pub fn active(&self) -> Option<FocusId> {
         self.with_ref(|s| s.active).unwrap_or(None)
+    }
+
+    /// Returns the most recent focus transition in a [`FocusScope`], if any.
+    pub fn last_focus_change(&self) -> Option<FocusChange> {
+        self.with_ref(|s| s.last_focus_change).unwrap_or(None)
     }
 
     /// Returns `true` if focus traversal (Tab / Shift+Tab) is currently enabled for this scope.
@@ -401,14 +527,15 @@ impl FocusContext {
         self.with_mut(|s| s.enabled = true);
     }
 
-    /// Globally disable focus traversal. Existing focus is retained but Tab navigation is a no-op.
+    /// Globally disable focus mutation. Existing focus is retained, but Tab
+    /// navigation, direct focus, click focus, and auto-focus are no-ops.
     pub fn disable(&self) {
         self.with_mut(|s| s.enabled = false);
     }
 
     /// Clear the active focus entirely.
     pub fn clear(&self) {
-        self.with_mut(|s| s.active = None);
+        self.with_mut(|s| s.set_active_without_stack(None));
     }
 
     // ---- Render-cycle wiring for UI-order tracking (review issue #3) ----
@@ -541,8 +668,8 @@ impl FocusHandle {
 
 /// A `Copy` handle returned by [`UseFocusManager::use_focus_manager`](crate::hooks::UseFocusManager::use_focus_manager).
 ///
-/// `FocusManager` exposes the imperative side of focus control: enable/disable traversal, jump
-/// to next/previous, or directly focus a specific id.
+/// `FocusManager` exposes the imperative side of focus control: enable/disable focus mutation,
+/// jump to next/previous, or directly focus a specific id.
 #[derive(Clone, Copy)]
 pub struct FocusManager {
     ctx: FocusContext,
@@ -558,22 +685,11 @@ impl FocusManager {
         self.ctx.enable();
     }
 
-    /// Disable **sequential** focus traversal in this scope.
+    /// Disable focus mutation in this scope.
     ///
-    /// After `disable()`:
-    ///
-    /// - Tab / Shift+Tab are a no-op (when `handle_keys` is still `true` the keys
-    ///   reach the scope but [`focus_next`](Self::focus_next) / [`focus_prev`](Self::focus_prev)
-    ///   themselves short-circuit).
-    /// - [`focus_next`](Self::focus_next) and [`focus_prev`](Self::focus_prev) — whether
-    ///   called programmatically or via keys — are no-ops.
-    /// - [`focus(id)`](Self::focus) **still works**. Direct, targeted focus is
-    ///   intentionally exempt so "disable" means "freeze the traversal ring" rather
-    ///   than "freeze all focus mutation".
-    /// - The currently active focus (if any) is retained.
-    ///
-    /// If you need the stronger "freeze everything" semantics, combine `disable()`
-    /// with avoiding calls to `focus(id)` — or drop the scope entirely.
+    /// This mirrors CC Ink's `FocusManager.disable()`: Tab/Shift+Tab traversal,
+    /// direct [`focus(id)`](Self::focus), click-to-focus, and auto-focus requests
+    /// are ignored while disabled. The currently active focus (if any) is retained.
     pub fn disable(&self) {
         self.ctx.disable();
     }
@@ -662,11 +778,11 @@ mod tests {
     }
 
     #[test]
-    fn auto_focus_first_wins() {
+    fn auto_focus_latest_wins_like_ink_commit_mount() {
         let mut s = FocusState::default();
-        let a = s.register(true, true);
-        let _b = s.register(true, true);
-        assert_eq!(s.active, Some(a));
+        let _a = s.register(true, true);
+        let b = s.register(true, true);
+        assert_eq!(s.active, Some(b));
     }
 
     #[test]
@@ -682,66 +798,62 @@ mod tests {
     }
 
     #[test]
-    fn unregister_promotes_next_active() {
-        let mut s = FocusState::default();
-        let a = s.register(false, true);
-        let b = s.register(false, true);
-        s.focus(a);
-        s.unregister(a);
-        assert_eq!(s.active, Some(b));
-    }
-
-    /// Regression for review issue #2: removing the *middle* active entry should advance
-    /// to the entry that follows it in the list, not jump back to the head. This must
-    /// match `set_entry_active(id, false)` behaviour for consistency.
-    #[test]
-    fn unregister_middle_promotes_following_entry_not_head() {
-        let mut s = FocusState::default();
-        let _a = s.register(false, true);
-        let b = s.register(false, true);
-        let c = s.register(false, true);
-        s.focus(b);
-        s.unregister(b);
-        // After removing b, focus should land on c (the next entry), not a (the head).
-        assert_eq!(s.active, Some(c));
-    }
-
-    /// Regression for review issue #2: removing the *last* active entry should wrap
-    /// to the head, matching the wrap-around semantics of `find_next`.
-    #[test]
-    fn unregister_tail_wraps_to_head() {
+    fn unregister_active_without_focus_stack_clears_focus() {
         let mut s = FocusState::default();
         let a = s.register(false, true);
         let _b = s.register(false, true);
-        let c = s.register(false, true);
-        s.focus(c);
-        s.unregister(c);
+        s.focus(a);
+        s.unregister(a);
+        assert_eq!(s.active, None);
+    }
+
+    #[test]
+    fn unregister_active_restores_previous_focus_from_stack() {
+        let mut s = FocusState::default();
+        let a = s.register(false, true);
+        let b = s.register(false, true);
+        let _c = s.register(false, true);
+        s.focus(a);
+        s.focus(b);
+        s.unregister(b);
         assert_eq!(s.active, Some(a));
     }
 
-    /// `unregister` and `set_entry_active(_, false)` must agree on where focus moves when
-    /// the active entry is removed/disabled. This test pins the equivalence.
     #[test]
-    fn unregister_and_deactivate_agree_on_focus_target() {
+    fn unregister_active_skips_removed_or_inactive_stack_entries() {
+        let mut s = FocusState::default();
+        let a = s.register(false, true);
+        let b = s.register(false, true);
+        let c = s.register(false, true);
+        s.focus(a);
+        s.focus(b);
+        s.focus(c);
+        s.unregister(b);
+        s.set_entry_active(a, false);
+        s.unregister(c);
+        assert_eq!(s.active, None);
+    }
+
+    #[test]
+    fn unregister_and_deactivate_intentionally_diverge_like_ink_node_removal() {
         let setup = || {
             let mut s = FocusState::default();
-            let _a = s.register(false, true);
+            let a = s.register(false, true);
             let b = s.register(false, true);
             let c = s.register(false, true);
-            let _d = s.register(false, true);
+            s.focus(a);
             s.focus(b);
-            (s, b, c)
+            (s, a, b, c)
         };
 
-        let (mut via_unregister, b, c) = setup();
+        let (mut via_unregister, a, b, _c) = setup();
         via_unregister.unregister(b);
 
-        let (mut via_deactivate, b, _) = setup();
+        let (mut via_deactivate, _a, b, c) = setup();
         via_deactivate.set_entry_active(b, false);
 
-        assert_eq!(via_unregister.active, via_deactivate.active);
-        // Sanity: both moved to the entry following `b`, which is `c`.
-        assert_eq!(via_unregister.active, Some(c));
+        assert_eq!(via_unregister.active, Some(a));
+        assert_eq!(via_deactivate.active, Some(c));
     }
 
     #[test]
@@ -781,6 +893,25 @@ mod tests {
         let b = s.register(false, false);
         s.focus(b);
         assert_eq!(s.active, None);
+    }
+
+    #[test]
+    fn non_tabbable_entries_are_skipped_but_programmatically_focusable() {
+        let mut s = FocusState::default();
+        let a = s.register(false, true);
+        let b = s.register(false, true);
+        let c = s.register(false, true);
+        s.set_entry_tabbable(a, false);
+
+        s.focus_next();
+        assert_eq!(s.active, Some(b));
+        s.focus_prev();
+        assert_eq!(s.active, Some(c));
+
+        s.focus(a);
+        assert_eq!(s.active, Some(a));
+        s.focus_next();
+        assert_eq!(s.active, Some(b));
     }
 
     // ----- Regression coverage for review issue #3 (UI order tracking) -----
@@ -921,13 +1052,26 @@ mod tests {
         assert!(!b_entry.is_active, "is_active should survive reorder");
     }
 
-    // ----- Regression coverage for disable() semantics (review issue #5) -----
-
-    /// `disable()` freezes sequential traversal only: `focus(id)` must still land.
-    /// This pins the documented distinction between "freeze the Tab ring" and
-    /// "freeze all focus mutation".
     #[test]
-    fn disable_blocks_traversal_but_not_direct_focus() {
+    fn reorder_to_match_preserves_is_tabbable_flag() {
+        let mut s = FocusState::default();
+        let a = s.register(false, true);
+        let b = s.register(false, true);
+        let c = s.register(false, true);
+        s.set_entry_tabbable(b, false);
+        assert!(!s.entries.iter().find(|e| e.id == b).unwrap().is_tabbable);
+        s.reorder_to_match(&[c, b, a]);
+        let b_entry = s.entries.iter().find(|e| e.id == b).unwrap();
+        assert!(!b_entry.is_tabbable, "is_tabbable should survive reorder");
+    }
+
+    // ----- Regression coverage for CC Ink FocusManager.disable() semantics -----
+
+    /// CC Ink's `FocusManager.disable()` blocks all focus mutation paths: Tab
+    /// traversal, direct `focus(node)`, click-to-focus, and autoFocus all go
+    /// through FocusManager methods that early-return while disabled.
+    #[test]
+    fn disable_blocks_traversal_direct_focus_and_autofocus() {
         let mut s = FocusState::default();
         let a = s.register(false, true);
         let b = s.register(false, true);
@@ -935,18 +1079,19 @@ mod tests {
         s.focus(a);
         s.enabled = false;
 
-        // Sequential navigation is a no-op while disabled.
         s.focus_next();
         assert_eq!(s.active, Some(a), "focus_next should be blocked");
         s.focus_prev();
         assert_eq!(s.active, Some(a), "focus_prev should be blocked");
-
-        // Direct focus still lands on the targeted id.
         s.focus(b);
-        assert_eq!(s.active, Some(b), "direct focus() must still work");
+        assert_eq!(s.active, Some(a), "direct focus() should be blocked");
 
-        // Re-enabling restores normal traversal.
+        let _auto = s.register(true, true);
+        assert_eq!(s.active, Some(a), "autoFocus should be blocked");
+
         s.enabled = true;
+        s.focus(b);
+        assert_eq!(s.active, Some(b));
         s.focus_next();
         assert_ne!(s.active, Some(b));
     }

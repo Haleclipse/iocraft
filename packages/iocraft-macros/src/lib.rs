@@ -717,6 +717,18 @@ pub fn with_layout_style_props(_attr: TokenStream, item: TokenStream) -> TokenSt
             pub padding: ::iocraft::Padding
         },
         quote! {
+            /// Defines the horizontal area to reserve to the left and right of the element's content, but inside the border.
+            ///
+            /// This is the Rust counterpart to CC Ink's `paddingX` shorthand.
+            pub padding_x: ::iocraft::Padding
+        },
+        quote! {
+            /// Defines the vertical area to reserve above and below the element's content, but inside the border.
+            ///
+            /// This is the Rust counterpart to CC Ink's `paddingY` shorthand.
+            pub padding_y: ::iocraft::Padding
+        },
+        quote! {
             /// Defines the area to reserve above the element's content, but inside the border.
             ///
             /// See [the MDN documentation for padding](https://developer.mozilla.org/en-US/docs/Web/CSS/padding).
@@ -781,6 +793,18 @@ pub fn with_layout_style_props(_attr: TokenStream, item: TokenStream) -> TokenSt
             pub margin: ::iocraft::Margin
         },
         quote! {
+            /// Defines the horizontal area to reserve to the left and right of the element's content, but outside the border.
+            ///
+            /// This is the Rust counterpart to CC Ink's `marginX` shorthand.
+            pub margin_x: ::iocraft::Margin
+        },
+        quote! {
+            /// Defines the vertical area to reserve above and below the element's content, but outside the border.
+            ///
+            /// This is the Rust counterpart to CC Ink's `marginY` shorthand.
+            pub margin_y: ::iocraft::Margin
+        },
+        quote! {
             /// Defines the area to reserve above the element's content, but outside the border.
             ///
             /// See [the MDN documentation for margin](https://developer.mozilla.org/en-US/docs/Web/CSS/margin).
@@ -841,6 +865,12 @@ pub fn with_layout_style_props(_attr: TokenStream, item: TokenStream) -> TokenSt
             ///
             /// See [the MDN documentation for align-items](https://developer.mozilla.org/en-US/docs/Web/CSS/align-items).
             pub align_items: Option<::iocraft::AlignItems>
+        },
+        quote! {
+            /// Overrides the parent's cross-axis alignment for this item.
+            ///
+            /// This is the Rust counterpart to CC Ink's `alignSelf` style.
+            pub align_self: Option<::iocraft::AlignSelf>
         },
         quote! {
             /// Controls the distribution of space between and around items along a flex container's cross axis.

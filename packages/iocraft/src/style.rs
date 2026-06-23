@@ -10,8 +10,8 @@ use taffy::{
 // Re-export basic enum types.
 pub use crossterm::style::Color;
 pub use taffy::style::{
-    AlignContent, AlignItems, Display, FlexDirection, FlexWrap, GridAutoFlow, JustifyContent,
-    Overflow, Position,
+    AlignContent, AlignItems, AlignSelf, Display, FlexDirection, FlexWrap, GridAutoFlow,
+    JustifyContent, Overflow, Position,
 };
 
 /// Defines a type that represents a percentage [0.0-100.0] and is convertible to any of the
@@ -210,7 +210,7 @@ impl From<FlexBasis> for Dimension {
 }
 
 /// A weight which can be applied to text.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Weight {
     /// The normal weight.
     #[default]
@@ -599,20 +599,22 @@ impl From<LayoutStyle> for Style {
                 height: s.max_height.into(),
             },
             gap: geometry::Size {
-                width: s.gap.or(s.column_gap).into(),
-                height: s.gap.or(s.row_gap).into(),
+                // CC Ink applies `gap` first, then lets axis-specific
+                // `columnGap` / `rowGap` override it.
+                width: s.column_gap.or(s.gap).into(),
+                height: s.row_gap.or(s.gap).into(),
             },
             padding: Rect {
-                left: s.padding_left.or(s.padding).into(),
-                right: s.padding_right.or(s.padding).into(),
-                top: s.padding_top.or(s.padding).into(),
-                bottom: s.padding_bottom.or(s.padding).into(),
+                left: s.padding_left.or(s.padding_x).or(s.padding).into(),
+                right: s.padding_right.or(s.padding_x).or(s.padding).into(),
+                top: s.padding_top.or(s.padding_y).or(s.padding).into(),
+                bottom: s.padding_bottom.or(s.padding_y).or(s.padding).into(),
             },
             margin: Rect {
-                left: s.margin_left.or(s.margin).into(),
-                right: s.margin_right.or(s.margin).into(),
-                top: s.margin_top.or(s.margin).into(),
-                bottom: s.margin_bottom.or(s.margin).into(),
+                left: s.margin_left.or(s.margin_x).or(s.margin).into(),
+                right: s.margin_right.or(s.margin_x).or(s.margin).into(),
+                top: s.margin_top.or(s.margin_y).or(s.margin).into(),
+                bottom: s.margin_bottom.or(s.margin_y).or(s.margin).into(),
             },
             inset: Rect {
                 left: s.left.or(s.inset).into(),
@@ -631,6 +633,7 @@ impl From<LayoutStyle> for Style {
             flex_grow: s.flex_grow,
             flex_shrink: s.flex_shrink.unwrap_or(1.0),
             align_items: s.align_items,
+            align_self: s.align_self,
             align_content: s.align_content,
             justify_content: s.justify_content,
             ..Default::default()
@@ -661,6 +664,38 @@ mod tests {
             "[area1-start] 1fr"
         );
         assert_eq!(css_with_cell_units("1.5 2"), "1.5px 2px");
+    }
+
+    #[test]
+    fn test_axis_shorthands_and_align_self_match_cc_ink_styles() {
+        let style: Style = LayoutStyle {
+            padding: 1.into(),
+            padding_x: 2.into(),
+            padding_y: 3.into(),
+            padding_left: 4.into(),
+            margin: 5.into(),
+            margin_x: 6.into(),
+            margin_y: 7.into(),
+            margin_bottom: 8.into(),
+            gap: 9.into(),
+            column_gap: 10.into(),
+            row_gap: 11.into(),
+            align_self: Some(AlignSelf::FLEX_END),
+            ..Default::default()
+        }
+        .into();
+
+        assert_eq!(style.padding.left, LengthPercentage::length(4.0));
+        assert_eq!(style.padding.right, LengthPercentage::length(2.0));
+        assert_eq!(style.padding.top, LengthPercentage::length(3.0));
+        assert_eq!(style.padding.bottom, LengthPercentage::length(3.0));
+        assert_eq!(style.margin.left, LengthPercentageAuto::length(6.0));
+        assert_eq!(style.margin.right, LengthPercentageAuto::length(6.0));
+        assert_eq!(style.margin.top, LengthPercentageAuto::length(7.0));
+        assert_eq!(style.margin.bottom, LengthPercentageAuto::length(8.0));
+        assert_eq!(style.gap.width, LengthPercentage::length(10.0));
+        assert_eq!(style.gap.height, LengthPercentage::length(11.0));
+        assert_eq!(style.align_self, Some(AlignSelf::FLEX_END));
     }
 
     #[test]

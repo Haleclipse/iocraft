@@ -1,7 +1,11 @@
 use crate::{
-    component, components::ContextProvider, element, focus::create_focus_context,
-    hooks::UseTerminalEvents, AnyElement, Context, FocusContext, Hooks, KeyCode, KeyEvent,
-    KeyEventKind, KeyModifiers, Props, TerminalEvent,
+    component,
+    components::{ContextProvider, ViewFocusParentContext},
+    element,
+    focus::create_focus_context,
+    hooks::{UseContext, UseTerminalDefaultEvents},
+    AnyElement, Context, FocusContext, Hooks, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, Props,
+    TerminalEvent,
 };
 
 /// The props which can be passed to the [`FocusScope`] component.
@@ -92,9 +96,13 @@ pub fn FocusScope<'a>(
     //     `handle_keys_can_toggle_false_to_true_without_panic` regression test).
     //   - `true  → false`: the previously-installed hook is *not* removed; it stays in
     //     the vector and keeps consuming key events, so the prop appears to do nothing.
+    let view_parent_context = hooks
+        .try_use_context::<ViewFocusParentContext>()
+        .map(|context| context.for_nested_focus_scope())
+        .unwrap_or_default();
     let handle_keys = props.handle_keys.unwrap_or(true);
     let trap_keys = props.trap_keys.unwrap_or(false);
-    hooks.use_propagated_terminal_events(move |propagated| {
+    hooks.use_terminal_default_events(move |propagated| {
         if !handle_keys {
             return;
         }
@@ -104,7 +112,7 @@ pub fn FocusScope<'a>(
             kind,
         }) = propagated.event()
         {
-            if *kind == KeyEventKind::Release {
+            if *kind == KeyEventKind::Release || propagated.is_default_prevented() {
                 return;
             }
             let handled = match code {
@@ -127,14 +135,16 @@ pub fn FocusScope<'a>(
                 _ => false,
             };
             if handled && trap_keys {
-                propagated.stop_propagation();
+                propagated.stop_default_propagation();
             }
         }
     });
 
     element! {
-        ContextProvider(value: Context::owned(ctx)) {
-            #(props.children.iter_mut())
+        ContextProvider(value: Context::owned(view_parent_context)) {
+            ContextProvider(value: Context::owned(ctx)) {
+                #(props.children.iter_mut())
+            }
         }
     }
 }
