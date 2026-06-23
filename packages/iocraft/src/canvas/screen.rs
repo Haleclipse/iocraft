@@ -1308,24 +1308,62 @@ impl Canvas {
     /// renderers can repaint cursor/search/selection changes even when the base
     /// text cells are identical. This is an optimization-only helper for custom
     /// renderers and never performs terminal I/O by itself.
-    pub fn diff_each<F>(&self, next: &Self, mut callback: F) -> bool
+    pub fn diff_each<F>(&self, next: &Self, callback: F) -> bool
     where
         F: FnMut(CanvasDiffChangeRef<'_>) -> bool,
     {
         let max_height = self.height().max(next.height());
         let max_width = self.width.max(next.width);
+        self.diff_each_in_bounds(
+            next,
+            DamageRegion {
+                x: 0,
+                y: 0,
+                width: max_width,
+                height: max_height,
+            },
+            callback,
+        )
+    }
 
-        for y in 0..max_height {
+    /// Calls `callback` for differences inside a bounded canvas region.
+    ///
+    /// This is the opt-in damage-bounded counterpart to [`Self::diff_each`]:
+    /// callers that already know a safe dirty rectangle can avoid scanning rows
+    /// outside it. The region is clipped to the union of both canvas extents,
+    /// row prefix skipping still uses [`Self::row_change_start`], and callback
+    /// semantics match [`Self::diff_each`]. Damage metadata is a scan hint only;
+    /// damage-only rows do not emit cell changes.
+    pub fn diff_each_in_bounds<F>(&self, next: &Self, bounds: DamageRegion, mut callback: F) -> bool
+    where
+        F: FnMut(CanvasDiffChangeRef<'_>) -> bool,
+    {
+        let max_height = self.height().max(next.height());
+        let max_width = self.width.max(next.width);
+        if max_height == 0 || max_width == 0 || bounds.width == 0 || bounds.height == 0 {
+            return false;
+        }
+
+        let top = bounds.y.min(max_height);
+        let bottom = bounds.y.saturating_add(bounds.height).min(max_height);
+        let left = bounds.x.min(max_width);
+        let right = bounds.x.saturating_add(bounds.width).min(max_width);
+        if bottom <= top || right <= left {
+            return false;
+        }
+
+        for y in top..bottom {
             let row_start = if y < self.height() && y < next.height() && self.width == next.width {
                 self.row_change_start(next, y).unwrap_or(max_width)
             } else {
                 0
-            };
-            if row_start >= max_width {
+            }
+            .max(left);
+            if row_start >= right {
                 continue;
             }
 
-            for x in row_start..max_width {
+            for x in row_start..right {
                 let removed = self.diff_cell_ref(x, y);
                 let added = next.diff_cell_ref(x, y);
                 let changed = match (removed, added) {

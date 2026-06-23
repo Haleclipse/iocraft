@@ -132,6 +132,66 @@ fn test_row_change_start_tracks_damage_overlay_and_wide_tail() {
 }
 
 #[test]
+fn test_diff_each_in_bounds_limits_scan_to_dirty_rect() {
+    let style = CanvasTextStyle::default();
+    let mut prev = Canvas::new(8, 4);
+    let mut next = Canvas::new(8, 4);
+    prev.subview_mut(0, 0, 0, 0, 8, 4)
+        .set_text(0, 0, "old0", style);
+    next.subview_mut(0, 0, 0, 0, 8, 4)
+        .set_text(0, 0, "new0", style);
+    prev.subview_mut(0, 0, 0, 0, 8, 4)
+        .set_text(0, 2, "aaXaa", style);
+    next.subview_mut(0, 0, 0, 0, 8, 4)
+        .set_text(0, 2, "aaYaa", style);
+
+    let mut rows = Vec::new();
+    prev.diff_each_in_bounds(
+        &next,
+        DamageRegion {
+            x: 2,
+            y: 2,
+            width: 1,
+            height: 1,
+        },
+        |change| {
+            rows.push((change.x, change.y));
+            false
+        },
+    );
+
+    assert_eq!(rows, vec![(2, 2)]);
+}
+
+#[test]
+fn test_diff_each_in_bounds_clips_growth_and_shrink() {
+    let style = CanvasTextStyle::default();
+    let mut prev = Canvas::new(4, 2);
+    let mut next = Canvas::new(6, 3);
+    prev.subview_mut(0, 0, 0, 0, 4, 2)
+        .set_text(0, 1, "gone", style);
+    next.subview_mut(0, 0, 0, 0, 6, 3)
+        .set_text(4, 2, "z", style);
+
+    let mut seen = Vec::new();
+    prev.diff_each_in_bounds(
+        &next,
+        DamageRegion {
+            x: 4,
+            y: 2,
+            width: 10,
+            height: 10,
+        },
+        |change| {
+            seen.push((change.x, change.y));
+            false
+        },
+    );
+
+    assert_eq!(seen, vec![(4, 2)]);
+}
+
+#[test]
 fn test_row_trimming_keeps_visible_sgr_spaces_like_cc_ink_screen() {
     let style = CanvasTextStyle {
         strikethrough: true,
