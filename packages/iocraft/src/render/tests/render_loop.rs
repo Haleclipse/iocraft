@@ -917,7 +917,9 @@ fn test_frame_profile_stats_accumulates_benchmark_metrics() {
             update: Duration::from_millis(1),
             layout: Duration::from_millis(2),
             draw: Duration::from_millis(3),
-            terminal_write: Duration::from_millis(4),
+            changed_cell_scan: Duration::from_millis(4),
+            repaint_check: Duration::from_millis(5),
+            terminal_write: Duration::from_millis(6),
             changed_cells: 5,
             canvas_width: 10,
             canvas_height: 2,
@@ -937,7 +939,9 @@ fn test_frame_profile_stats_accumulates_benchmark_metrics() {
             update: Duration::from_millis(3),
             layout: Duration::from_millis(4),
             draw: Duration::from_millis(5),
-            terminal_write: Duration::from_millis(6),
+            changed_cell_scan: Duration::from_millis(6),
+            repaint_check: Duration::from_millis(7),
+            terminal_write: Duration::from_millis(8),
             changed_cells: 9,
             canvas_width: 10,
             canvas_height: 2,
@@ -952,7 +956,9 @@ fn test_frame_profile_stats_accumulates_benchmark_metrics() {
     assert_eq!(stats.average_update(), Duration::from_millis(2));
     assert_eq!(stats.average_layout(), Duration::from_millis(3));
     assert_eq!(stats.average_draw(), Duration::from_millis(4));
-    assert_eq!(stats.average_terminal_write(), Duration::from_millis(5));
+    assert_eq!(stats.average_changed_cell_scan(), Duration::from_millis(5));
+    assert_eq!(stats.average_repaint_check(), Duration::from_millis(6));
+    assert_eq!(stats.average_terminal_write(), Duration::from_millis(7));
     assert_eq!(stats.total_changed_cells, 14);
     assert_eq!(stats.max_changed_cells, 9);
     assert_eq!(stats.average_changed_cells(), 7.0);
@@ -997,6 +1003,14 @@ async fn test_frame_profile_callback_reports_repaint_phases() {
     assert!(
         first.phases.changed_cells > 0,
         "profile should include a retained-canvas change count"
+    );
+    assert!(
+        first.phases.changed_cell_scan > Duration::ZERO,
+        "profile should include changed-cell scan timing"
+    );
+    assert!(
+        first.phases.repaint_check > Duration::ZERO,
+        "profile should include repaint guard/equality timing"
     );
 }
 

@@ -69,6 +69,10 @@ pub struct RenderFramePhases {
     pub layout: Duration,
     /// Canvas drawing time.
     pub draw: Duration,
+    /// Time spent counting retained-canvas changed cells for profiling.
+    pub changed_cell_scan: Duration,
+    /// Time spent evaluating repaint guards, including retained canvas equality.
+    pub repaint_check: Duration,
     /// Terminal diff/write/cursor-positioning time.
     pub terminal_write: Duration,
     /// Number of retained-canvas cells that differed from the previous frame.
@@ -102,6 +106,10 @@ pub struct RenderFrameProfileStats {
     pub total_layout: Duration,
     /// Total canvas draw time.
     pub total_draw: Duration,
+    /// Total changed-cell profiling scan time.
+    pub total_changed_cell_scan: Duration,
+    /// Total repaint guard/equality-check time.
+    pub total_repaint_check: Duration,
     /// Total terminal diff/write/cursor-positioning time.
     pub total_terminal_write: Duration,
     /// Sum of retained-canvas changed cells across frames.
@@ -122,6 +130,11 @@ impl RenderFrameProfileStats {
         saturating_duration_add(&mut self.total_update, event.phases.update);
         saturating_duration_add(&mut self.total_layout, event.phases.layout);
         saturating_duration_add(&mut self.total_draw, event.phases.draw);
+        saturating_duration_add(
+            &mut self.total_changed_cell_scan,
+            event.phases.changed_cell_scan,
+        );
+        saturating_duration_add(&mut self.total_repaint_check, event.phases.repaint_check);
         saturating_duration_add(&mut self.total_terminal_write, event.phases.terminal_write);
         self.total_changed_cells = self
             .total_changed_cells
@@ -147,6 +160,16 @@ impl RenderFrameProfileStats {
     /// Average canvas draw time.
     pub fn average_draw(&self) -> Duration {
         average_duration(self.total_draw, self.frames)
+    }
+
+    /// Average changed-cell profiling scan time.
+    pub fn average_changed_cell_scan(&self) -> Duration {
+        average_duration(self.total_changed_cell_scan, self.frames)
+    }
+
+    /// Average repaint guard/equality-check time.
+    pub fn average_repaint_check(&self) -> Duration {
+        average_duration(self.total_repaint_check, self.frames)
     }
 
     /// Average terminal write time.
@@ -1339,11 +1362,14 @@ impl<'a> Tree<'a> {
                     Some(&mut term),
                     profile_enabled,
                 );
+                let changed_cell_scan_start = profile_enabled.then(std::time::Instant::now);
                 let changed_cells = if profile_enabled {
                     count_changed_cells(prev_canvas.as_ref(), &output.canvas)
                 } else {
                     0
                 };
+                frame_phases.changed_cell_scan =
+                    changed_cell_scan_start.map_or(Duration::ZERO, |start| start.elapsed());
                 debug_log_render_frame(
                     &output,
                     prev_canvas.as_ref(),
@@ -1351,6 +1377,7 @@ impl<'a> Tree<'a> {
                     terminal_size_changed,
                     changed_cells,
                 );
+                let repaint_check_start = profile_enabled.then(std::time::Instant::now);
                 let should_repaint = output.did_clear_terminal_output
                     || output.alternate_screen_changed
                     || terminal_size_changed
@@ -1360,6 +1387,8 @@ impl<'a> Tree<'a> {
                         .as_ref()
                         .is_some_and(|canvas| canvas.has_damage())
                     || prev_canvas.as_ref() != Some(&output.canvas);
+                frame_phases.repaint_check =
+                    repaint_check_start.map_or(Duration::ZERO, |start| start.elapsed());
                 let previous_damage = prev_canvas.as_ref().and_then(Canvas::damage_region);
                 if should_repaint {
                     let reason = classify_debug_repaint_reason(
