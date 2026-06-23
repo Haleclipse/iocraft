@@ -71,6 +71,7 @@ impl Component for ContextProvider {
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
+    use futures::StreamExt;
 
     struct StringContext(String);
 
@@ -110,5 +111,75 @@ mod tests {
             .to_string(),
             "foo\n"
         );
+    }
+
+    #[component]
+    fn ContextProviderRootHitTestApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut first_clicks = hooks.use_state(|| 0usize);
+        let mut second_clicks = hooks.use_state(|| 0usize);
+        let mut releases = hooks.use_state(|| 0usize);
+
+        hooks.use_terminal_events(move |event| {
+            if matches!(
+                event,
+                TerminalEvent::FullscreenMouse(FullscreenMouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    ..
+                })
+            ) {
+                releases += 1;
+            }
+        });
+        if releases.get() > 0 {
+            system.exit();
+        }
+
+        let first = first_clicks.get();
+        let second = second_clicks.get();
+        element! {
+            ContextProvider(value: Context::owned(StringContext("ctx".into()))) {
+                View(
+                    width: 8,
+                    height: 1,
+                    on_click: move |_| first_clicks += 1,
+                ) {
+                    Text(content: "first")
+                }
+                View(
+                    width: 8,
+                    height: 1,
+                    position: Position::Absolute,
+                    top: 0,
+                    left: 0,
+                    on_click: move |_| second_clicks += 1,
+                ) {
+                    Text(content: format!("{first}/{second} top"))
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_context_provider_preserves_root_event_context_for_topmost_hit_test() {
+        let canvases: Vec<_> = smol::block_on(
+            element!(ContextProviderRootHitTestApp)
+                .mock_terminal_render_loop(MockTerminalConfig::with_events(futures::stream::iter(
+                    vec![
+                        TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
+                            MouseEventKind::Down(MouseButton::Left),
+                            1,
+                            0,
+                        )),
+                        TerminalEvent::FullscreenMouse(FullscreenMouseEvent::new(
+                            MouseEventKind::Up(MouseButton::Left),
+                            1,
+                            0,
+                        )),
+                    ],
+                )))
+                .collect(),
+        );
+        assert_eq!(canvases.last().unwrap().to_string(), "0/1 top\n");
     }
 }

@@ -1,8 +1,12 @@
 use crate::{
-    components::{BorderStyle, Text, View},
-    element, AnyElement, Color, Component, ComponentUpdater, Hooks, Props, Weight,
+    components::{ErrorLocation, ErrorOverview},
+    element, AnyElement, Component, ComponentUpdater, Hooks, Props,
 };
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::{
+    any::Any,
+    panic::{catch_unwind, AssertUnwindSafe},
+    sync::{Arc, Mutex},
+};
 
 /// The props which can be passed to the [`ErrorBoundary`] component.
 #[non_exhaustive]
@@ -58,7 +62,15 @@ pub struct ErrorBoundary {
     error: Option<String>,
 }
 
-fn format_panic(payload: Box<dyn std::any::Any + Send>) -> String {
+static PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
+
+#[derive(Clone, Debug)]
+struct CapturedPanic {
+    message: String,
+    location: Option<ErrorLocation>,
+}
+
+fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         s.to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -66,6 +78,10 @@ fn format_panic(payload: Box<dyn std::any::Any + Send>) -> String {
     } else {
         "unknown panic".to_string()
     }
+}
+
+fn format_panic(payload: Box<dyn Any + Send>) -> String {
+    panic_payload_message(&*payload)
 }
 
 impl Component for ErrorBoundary {
@@ -87,11 +103,31 @@ impl Component for ErrorBoundary {
         // We temporarily install a silent panic hook so the default hook doesn't
         // print the panic message to stderr (which would corrupt the TUI output).
         // The previous hook is restored immediately after catch_unwind returns.
-        let children = std::mem::take(&mut props.children);
+        let captured_panic = Arc::new(Mutex::new(None::<CapturedPanic>));
+        let captured_for_hook = captured_panic.clone();
+        // The panic hook is global. Serialize hook replacement so concurrent
+        // ErrorBoundary instances/tests cannot restore each other's hook while
+        // another subtree is still unwinding.
+        let _hook_guard = PANIC_HOOK_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
+        std::panic::set_hook(Box::new(move |info| {
+            let location = info.location().map(|location| ErrorLocation {
+                file: location.file().to_string(),
+                line: location.line() as usize,
+                column: Some(location.column() as usize),
+            });
+            let captured = CapturedPanic {
+                message: panic_payload_message(info.payload()),
+                location,
+            };
+            *captured_for_hook
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(captured);
+        }));
         let result = catch_unwind(AssertUnwindSafe(|| {
-            updater.update_children(children, None);
+            updater.update_children(props.children.iter_mut(), None);
         }));
         std::panic::set_hook(prev_hook);
 
@@ -100,20 +136,21 @@ impl Component for ErrorBoundary {
                 self.error = None;
             }
             Err(panic_payload) => {
-                let msg = format_panic(panic_payload);
+                let captured = captured_panic
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                let msg = captured
+                    .as_ref()
+                    .map(|panic| panic.message.clone())
+                    .unwrap_or_else(|| format_panic(panic_payload));
+                let location = captured.and_then(|panic| panic.location);
                 self.error = Some(msg.clone());
-                // Render a fallback error display in place of the crashed subtree.
+                // Render a CC Ink-style fallback error display in place of the
+                // crashed subtree, preserving the panic location when Rust's
+                // panic hook provides one.
                 let fallback = element! {
-                    View(
-                        border_style: BorderStyle::Round,
-                        border_color: Color::Red,
-                    ) {
-                        Text(
-                            content: format!("Error: {msg}"),
-                            color: Color::Red,
-                            weight: Weight::Bold,
-                        )
-                    }
+                    ErrorOverview(message: msg, location: location)
                 };
                 updater.update_children(std::iter::once(fallback), None);
             }
@@ -158,8 +195,12 @@ mod tests {
         }
         .to_string();
         assert!(
-            output.contains("Error: boom"),
-            "should render error fallback: {output:?}"
+            output.contains("ERROR  boom"),
+            "should render CC Ink-style error fallback: {output:?}"
+        );
+        assert!(
+            output.contains("error_boundary.rs:"),
+            "panic source location should be surfaced: {output:?}"
         );
     }
 
@@ -175,7 +216,7 @@ mod tests {
         }
         .to_string();
         assert!(
-            output.contains("Error: boom"),
+            output.contains("ERROR  boom"),
             "boundary catches: {output:?}"
         );
         assert!(
