@@ -104,6 +104,7 @@
 
 mod ansi;
 mod any_key;
+mod bidi;
 mod canvas;
 mod component;
 mod context;
@@ -121,6 +122,7 @@ mod terminal;
 pub(crate) mod unicode_linebreak;
 
 mod flattened_exports {
+    pub use crate::ansi::supports_hyperlinks;
     pub use crate::canvas::*;
     pub use crate::component::*;
     pub use crate::context::*;

@@ -3,7 +3,7 @@ use core::{
     fmt::{self, Display},
     mem,
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// A `SegmentedString` is a string consisting of multiple segments, which don't have to be
 /// contiguous.
@@ -23,7 +23,11 @@ pub struct SegmentedStringLine<'a> {
 }
 
 impl<'a> SegmentedStringLine<'a> {
-    fn push_segment(&mut self, segment: SegmentedStringLineSegment<'a>) {
+    fn push_segment(&mut self, mut segment: SegmentedStringLineSegment<'a>) {
+        // Segment width is column-dependent when tabs are present. Recompute it
+        // from the current terminal column so wrapping and layout measure tabs
+        // the same way output.ts expands them in the CC Ink fork.
+        segment.width = crate::canvas::string_display_width_from_col(segment.text, self.width);
         self.width += segment.width;
         self.segments.push(segment);
     }
@@ -104,6 +108,18 @@ impl<'a> SegmentedString<'a> {
         }
     }
 
+    fn segments_text(segments: &[SegmentedStringLineSegment<'_>]) -> String {
+        segments.iter().map(|segment| segment.text).collect()
+    }
+
+    fn segments_visible_width_from_col(
+        segments: &[SegmentedStringLineSegment<'_>],
+        start_col: usize,
+    ) -> usize {
+        let text = Self::segments_text(segments);
+        crate::canvas::string_display_width_from_col(text.trim_end(), start_col)
+    }
+
     fn merge_adjacent_line_segments(&self, line: &mut SegmentedStringLine<'a>) {
         if line.segments.is_empty() {
             return;
@@ -170,20 +186,14 @@ impl<'a> SegmentedString<'a> {
                 start_char_idx = char_idx;
             }
 
-            let new_line_segments_width: usize = new_line_segments.iter().map(|s| s.width).sum();
+            let new_line_segments_visible_width =
+                Self::segments_visible_width_from_col(&new_line_segments, current_line.width);
 
-            let trailing_whitespace_width: usize = new_line_segments
-                .iter()
-                .rev()
-                .flat_map(|s| s.text.chars().rev())
-                .take_while(|c| c.is_whitespace())
-                .map(|c| c.width().unwrap_or(0))
-                .sum();
-
-            if current_line.width + (new_line_segments_width - trailing_whitespace_width) <= width {
-                // Everything fits into the current line
-                current_line.segments.append(&mut new_line_segments);
-                current_line.width += new_line_segments_width;
+            if current_line.width + new_line_segments_visible_width <= width {
+                // Everything fits into the current line.
+                for segment in new_line_segments {
+                    current_line.push_segment(segment);
+                }
             } else {
                 // Break if necessary, then add more lines
                 if current_line.width > 0 {
@@ -199,28 +209,33 @@ impl<'a> SegmentedString<'a> {
                         .last()
                         .map(|(i, _)| i)
                         .unwrap_or(segment.text.len());
-                    let trailing_whitespace_width = crate::canvas::string_display_width(
-                        &segment.text[trailing_whitespace_idx..],
+                    let visible_width = crate::canvas::string_display_width_from_col(
+                        &segment.text[..trailing_whitespace_idx],
+                        current_line.width,
                     );
 
-                    if current_line.width + (segment.width - trailing_whitespace_width) > width {
+                    if current_line.width + visible_width > width {
                         // This segment is too wide, we need to forcefully break it
                         let mut w = 0;
                         let mut start_idx = 0;
-                        for (idx, c) in segment.text.char_indices() {
+                        for (idx, grapheme) in segment.text.grapheme_indices(true) {
                             if idx >= trailing_whitespace_idx {
                                 break;
                             }
-                            let char_width = c.width().unwrap_or(0);
-                            if w > 0 && w + char_width > width {
-                                // We have a full line
+                            let grapheme_width =
+                                crate::canvas::string_display_width_from_col(grapheme, w);
+                            if w > 0 && w + grapheme_width > width {
+                                // We have a full line. Break on grapheme boundaries
+                                // and measure with the same terminal-width helper as
+                                // the renderer, matching CC Ink's wrapAnsi/stringWidth
+                                // path for VS16 emoji, keycaps, and ZWJ clusters.
                                 current_line.push_segment(segment.substring(start_idx, idx));
                                 lines.push(current_line);
                                 current_line = SegmentedStringLine::default();
                                 w = 0;
                                 start_idx = idx;
                             }
-                            w += char_width;
+                            w += grapheme_width;
                         }
                         // Add the remaining part of the segment, if any
                         if start_idx < segment.text.len() {
@@ -409,6 +424,34 @@ mod tests {
                 .map(|line| line.to_string())
                 .collect::<Vec<_>>();
             assert_eq!(lines, vec!["this is a ", "wrapping test"]);
+        }
+
+        {
+            let segmented_string = SegmentedString::from("a\tb");
+            let lines = segmented_string.wrap(8);
+            assert_eq!(
+                lines,
+                vec![
+                    SegmentedStringLine {
+                        segments: vec![SegmentedStringLineSegment {
+                            text: "a\t",
+                            index: 0,
+                            offset: 0,
+                            width: 8,
+                        }],
+                        width: 8,
+                    },
+                    SegmentedStringLine {
+                        segments: vec![SegmentedStringLineSegment {
+                            text: "b",
+                            index: 0,
+                            offset: 2,
+                            width: 1,
+                        }],
+                        width: 1,
+                    },
+                ]
+            );
         }
     }
 }
