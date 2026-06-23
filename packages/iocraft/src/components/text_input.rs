@@ -321,7 +321,7 @@ impl Component for TextBufferView {
             ..Default::default()
         };
         self.buffer = props.buffer.clone();
-        updater.set_layout_style(
+        updater.set_layout_style_if_changed(
             LayoutStyle {
                 position: Position::Absolute,
                 top: 0.into(),

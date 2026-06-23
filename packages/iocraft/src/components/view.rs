@@ -1916,7 +1916,7 @@ impl Component for View {
                 }),
             }
         };
-        updater.set_layout_style(style);
+        updater.set_layout_style_if_changed(style);
         let child_focus_context = {
             let mut context = parent_view_context.clone();
             context.id = self.focus_id.or(parent_view_context.id);

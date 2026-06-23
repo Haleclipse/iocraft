@@ -2764,6 +2764,25 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
             .expect("we should be able to set the style");
     }
 
+    /// Sets the layout style only when it differs from the current style.
+    ///
+    /// This mirrors CC Ink's style equality guard: rebuilding an equivalent
+    /// style value should not dirty layout or wake Taffy recomputation.
+    /// Returns `true` when the style was changed.
+    pub fn set_layout_style_if_changed(&mut self, layout_style: taffy::style::Style) -> bool {
+        if self
+            .context
+            .layout_engine
+            .style(self.node_id)
+            .is_ok_and(|current| current == &layout_style)
+        {
+            return false;
+        }
+
+        self.set_layout_style(layout_style);
+        true
+    }
+
     /// Sets the measure function of the current component, which is invoked to calculate the area
     /// that the component's content should occupy.
     pub fn set_measure_func(&mut self, measure_func: MeasureFunc) {

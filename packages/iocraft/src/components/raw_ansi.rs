@@ -52,7 +52,7 @@ impl Component for RawAnsi {
     ) {
         self.lines = props.lines.clone();
         self.width = props.width;
-        updater.set_layout_style(taffy::style::Style {
+        updater.set_layout_style_if_changed(taffy::style::Style {
             size: Size {
                 width: Dimension::length(self.width as f32),
                 height: Dimension::length(self.lines.len() as f32),

@@ -1,4 +1,4 @@
-use crate::{AnyElement, Component, ComponentUpdater, Hooks, Props};
+use crate::{AnyElement, Canvas, Component, ComponentDrawer, ComponentUpdater, Hook, Hooks, Props};
 
 /// Context marker that disables [`OffscreenFreeze`] freezing inside virtualized
 /// in-app lists.
@@ -21,6 +21,117 @@ pub struct OffscreenFreezeProps<'a> {
     /// used. This is mainly useful for deterministic tests/examples or custom
     /// viewport owners.
     pub terminal_rows: Option<u16>,
+
+    /// Marks the restored cached region damaged. Defaults to `false` to keep
+    /// native-scrollback prompt-only frames on the sparse terminal diff path.
+    pub damage_on_restore: Option<bool>,
+}
+
+struct OffscreenFreezeSnapshot {
+    width: u16,
+    height: u16,
+    canvas: Canvas,
+}
+
+fn is_drawer_visible_in_terminal_viewport(
+    drawer: &mut ComponentDrawer,
+    terminal_rows: u16,
+) -> bool {
+    let rows = terminal_rows as isize;
+    if rows <= 0 {
+        return true;
+    }
+
+    let position = drawer.canvas_position();
+    let size = drawer.size();
+    let absolute_top = position.y as isize;
+    let bottom = absolute_top + size.height as isize;
+    let screen_height = drawer.root_canvas_mut().height() as isize;
+    let cursor_restore_scroll = if screen_height > rows { 1 } else { 0 };
+    let viewport_top = (screen_height - rows).max(0) + cursor_restore_scroll;
+    let viewport_bottom = viewport_top + rows;
+    bottom > viewport_top && absolute_top < viewport_bottom
+}
+
+#[derive(Default)]
+struct OffscreenFreezeDrawCache {
+    frozen: bool,
+    bypassed: bool,
+    damage_on_restore: bool,
+    terminal_rows: u16,
+    snapshot: Option<OffscreenFreezeSnapshot>,
+}
+
+impl Hook for OffscreenFreezeDrawCache {
+    fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+        self.frozen =
+            !self.bypassed && !is_drawer_visible_in_terminal_viewport(drawer, self.terminal_rows);
+        if !self.frozen {
+            return;
+        }
+
+        let size = drawer.size();
+        let Some(snapshot) = &self.snapshot else {
+            return;
+        };
+        if snapshot.width != size.width || snapshot.height != size.height {
+            return;
+        }
+
+        if self.damage_on_restore {
+            drawer.canvas().blit_region_from(
+                &snapshot.canvas,
+                0,
+                0,
+                0,
+                0,
+                size.width as usize,
+                size.height as usize,
+            );
+        } else {
+            drawer.canvas().blit_region_from_clean(
+                &snapshot.canvas,
+                0,
+                0,
+                0,
+                0,
+                size.width as usize,
+                size.height as usize,
+            );
+        }
+        drawer.skip_children();
+    }
+
+    fn post_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+        if self.bypassed {
+            self.snapshot = None;
+            return;
+        }
+        if self.frozen {
+            return;
+        }
+
+        let size = drawer.size();
+        let pos = drawer.canvas_position();
+        if size.width == 0 || size.height == 0 || pos.x < 0 || pos.y < 0 {
+            self.snapshot = None;
+            return;
+        }
+        let (x, y) = (pos.x as usize, pos.y as usize);
+        let root = drawer.root_canvas_mut();
+        if x.saturating_add(size.width as usize) > root.width()
+            || y.saturating_add(size.height as usize) > root.height()
+        {
+            self.snapshot = None;
+            return;
+        }
+
+        self.snapshot = Some(OffscreenFreezeSnapshot {
+            width: size.width,
+            height: size.height,
+            canvas: root.copy_region(x, y, size.width as usize, size.height as usize),
+        });
+    }
 }
 
 /// Freezes a subtree once its rows have moved into native terminal scrollback.
@@ -30,9 +141,9 @@ pub struct OffscreenFreezeProps<'a> {
 /// detected outside the live viewport, the previous child component tree is
 /// retained and reused without applying new child props. If an
 /// [`InVirtualListContext`] is present, freezing is bypassed because virtual
-/// lists clip inside an app viewport rather than native scrollback. The latest
-/// visibility value comes from [`use_terminal_viewport`](crate::hooks::UseTerminalViewport)
-/// and does not by itself schedule extra renders.
+/// lists clip inside an app viewport rather than native scrollback. Draw-time
+/// viewport checks restore the last visible canvas snapshot without scheduling
+/// an extra render.
 #[derive(Default)]
 pub struct OffscreenFreeze;
 
@@ -50,17 +161,20 @@ impl Component for OffscreenFreeze {
         updater: &mut ComponentUpdater,
     ) {
         let (_, actual_rows) = crate::hooks::UseTerminalSize::use_terminal_size(&mut hooks);
-        let rows = props.terminal_rows.unwrap_or(actual_rows);
-        let entry =
-            crate::hooks::UseTerminalViewport::use_terminal_viewport_with_rows(&mut hooks, rows);
         let in_virtual_list = updater.get_context::<InVirtualListContext>().is_some();
+        let draw_cache = hooks.use_hook(OffscreenFreezeDrawCache::default);
+        draw_cache.terminal_rows = props.terminal_rows.unwrap_or(actual_rows);
+        draw_cache.bypassed = in_virtual_list;
+        draw_cache.damage_on_restore = props.damage_on_restore.unwrap_or(false);
 
-        if entry.is_visible || in_virtual_list {
+        if !draw_cache.frozen || in_virtual_list {
             updater.update_children(props.children.iter_mut(), None);
         }
         // When offscreen, intentionally do not call update_children. The
         // previously instantiated children remain attached to this wrapper's
         // layout node and draw unchanged, mirroring CC Ink's cached element ref.
+        // The draw hook restores the last visible canvas snapshot and skips
+        // child drawing so static scrollback rows do not redraw on prompt-only frames.
     }
 }
 

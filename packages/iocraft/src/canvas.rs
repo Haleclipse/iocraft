@@ -8677,6 +8677,39 @@ impl CanvasSubviewMut<'_> {
         width: usize,
         height: usize,
     ) {
+        self.blit_region_from_impl(src, dst_x, dst_y, src_x, src_y, width, height, true);
+    }
+
+    /// Copies a rectangular region from `src` without marking terminal-output damage.
+    ///
+    /// This is the clean-blit counterpart to [`Self::blit_region_from`]. Use it
+    /// only when the restored cells are known to match the previous terminal
+    /// frame; otherwise the terminal writer may skip a repaint that is required
+    /// to repair stale physical output.
+    pub fn blit_region_from_clean(
+        &mut self,
+        src: &Canvas,
+        dst_x: isize,
+        dst_y: isize,
+        src_x: usize,
+        src_y: usize,
+        width: usize,
+        height: usize,
+    ) {
+        self.blit_region_from_impl(src, dst_x, dst_y, src_x, src_y, width, height, false);
+    }
+
+    fn blit_region_from_impl(
+        &mut self,
+        src: &Canvas,
+        dst_x: isize,
+        dst_y: isize,
+        src_x: usize,
+        src_y: usize,
+        width: usize,
+        height: usize,
+        mark_damage: bool,
+    ) {
         if width == 0 || height == 0 || src_x >= src.width() || src_y >= src.height() {
             return;
         }
@@ -8768,12 +8801,14 @@ impl CanvasSubviewMut<'_> {
             }
         }
 
-        self.canvas.mark_damage(DamageRegion {
-            x: dst_left,
-            y: dst_top,
-            width: damage_width,
-            height: copy_height,
-        });
+        if mark_damage {
+            self.canvas.mark_damage(DamageRegion {
+                x: dst_left,
+                y: dst_top,
+                width: damage_width,
+                height: copy_height,
+            });
+        }
     }
 
     /// Declares the physical cursor position at the given **relative** subview position.

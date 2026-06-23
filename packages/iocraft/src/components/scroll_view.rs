@@ -1745,7 +1745,7 @@ impl Component for ScrollViewScrollbar {
         self.thumb_color = props.thumb_color;
         self.track_color = props.track_color;
 
-        updater.set_layout_style(taffy::style::Style {
+        updater.set_layout_style_if_changed(taffy::style::Style {
             size: taffy::geometry::Size {
                 width: taffy::style::Dimension::length(1.0),
                 height: taffy::style::Dimension::percent(1.0),

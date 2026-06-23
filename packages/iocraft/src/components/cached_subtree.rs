@@ -15,6 +15,11 @@ pub struct CachedSubtreeProps<'a> {
 
     /// Enables the cache. Defaults to `true`.
     pub enabled: Option<bool>,
+
+    /// Marks the restored region damaged. Defaults to `true` for compatibility.
+    /// Set to `false` for CC Ink-style clean blits when the cached subtree is
+    /// known to match the previous terminal frame.
+    pub damage_on_restore: Option<bool>,
 }
 
 struct CachedSubtreeSnapshot {
@@ -28,6 +33,7 @@ struct CachedSubtreeSnapshot {
 struct CachedSubtreeHook {
     key: String,
     enabled: bool,
+    damage_on_restore: bool,
     snapshot: Option<CachedSubtreeSnapshot>,
 }
 
@@ -50,15 +56,27 @@ impl Hook for CachedSubtreeHook {
             return;
         }
 
-        drawer.canvas().blit_region_from(
-            &snapshot.canvas,
-            0,
-            0,
-            0,
-            0,
-            size.width as usize,
-            size.height as usize,
-        );
+        if self.damage_on_restore {
+            drawer.canvas().blit_region_from(
+                &snapshot.canvas,
+                0,
+                0,
+                0,
+                0,
+                size.width as usize,
+                size.height as usize,
+            );
+        } else {
+            drawer.canvas().blit_region_from_clean(
+                &snapshot.canvas,
+                0,
+                0,
+                0,
+                0,
+                size.width as usize,
+                size.height as usize,
+            );
+        }
         drawer.skip_children();
     }
 
@@ -111,6 +129,7 @@ pub fn CachedSubtree<'a>(
     let hook = hooks.use_hook(CachedSubtreeHook::default);
     hook.key = props.cache_key.clone();
     hook.enabled = props.enabled.unwrap_or(true);
+    hook.damage_on_restore = props.damage_on_restore.unwrap_or(true);
 
     element! {
         View(width: 100pct) {
@@ -168,6 +187,53 @@ mod tests {
         assert!(
             canvases.last().unwrap().has_damage(),
             "cached blit should mark the restored region damaged"
+        );
+    }
+
+    #[component]
+    fn CachedSubtreeCleanProbe(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut phase = hooks.use_state(|| 0u8);
+        hooks.use_terminal_events(move |event| {
+            if matches!(
+                event,
+                TerminalEvent::Key(KeyEvent {
+                    code: KeyCode::Char('x'),
+                    kind: KeyEventKind::Press,
+                    ..
+                })
+            ) {
+                phase.set(1);
+            }
+        });
+
+        if phase.get() == 1 {
+            system.exit();
+        }
+
+        element! {
+            View(width: 10) {
+                CachedSubtree(cache_key: "stable".to_string(), damage_on_restore: false) {
+                    Text(content: if phase.get() == 0 { "first" } else { "changed" })
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_cached_subtree_can_restore_without_marking_damage() {
+        let canvases: Vec<_> = smol::block_on(
+            element!(CachedSubtreeCleanProbe)
+                .mock_terminal_render_loop(MockTerminalConfig::with_events(stream::iter(vec![
+                    TerminalEvent::Key(KeyEvent::new(KeyEventKind::Press, KeyCode::Char('x'))),
+                ])))
+                .collect(),
+        );
+        let canvas = canvases.last().unwrap();
+        assert_eq!(canvas.to_string(), "first\n");
+        assert!(
+            !canvas.has_damage(),
+            "clean cached blit should preserve terminal diff fast path"
         );
     }
 

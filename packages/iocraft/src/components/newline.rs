@@ -39,7 +39,7 @@ impl Component for Newline {
         updater: &mut ComponentUpdater,
     ) {
         self.count = props.count.max(0) as u16;
-        updater.set_layout_style(taffy::style::Style {
+        updater.set_layout_style_if_changed(taffy::style::Style {
             size: Size {
                 width: Dimension::length(0.0),
                 height: Dimension::length(self.count as f32),

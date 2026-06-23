@@ -26,7 +26,7 @@ impl Component for Spacer {
         _hooks: Hooks,
         updater: &mut ComponentUpdater,
     ) {
-        updater.set_layout_style(Style {
+        updater.set_layout_style_if_changed(Style {
             flex_grow: 1.0,
             ..Default::default()
         });
