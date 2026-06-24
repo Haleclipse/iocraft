@@ -491,6 +491,151 @@ fn test_plan_terminal_canvas_diff_keeps_optimized_bounds_opt_in_and_safe() {
         unsafe_bounds.bounds, None,
         "content changes keep full-canvas safety"
     );
+
+    let unsafe_bounds_without_count = plan_terminal_canvas_diff(
+        Some(&previous),
+        &damaged_and_changed,
+        TerminalDiffPlanning::SinglePass {
+            bounds: DiffBoundsMode::DamageRegionWhenSafe,
+            count_changed_cells: false,
+        },
+        TerminalCanvasDiffContext::default(),
+    );
+    assert_eq!(unsafe_bounds_without_count.changed_cells, None);
+    assert_eq!(
+        unsafe_bounds_without_count.bounds, None,
+        "safety proof must still reject bounds when changed-cell counting is disabled"
+    );
+}
+
+#[test]
+fn test_plan_terminal_canvas_diff_unions_previous_and_next_damage_bounds() {
+    let mut previous = Canvas::new(10, 4);
+    previous
+        .subview_mut(0, 0, 0, 0, 10, 4)
+        .set_text(0, 0, "stable", CanvasTextStyle::default());
+    previous.clear_damage();
+    previous.mark_damage(DamageRegion {
+        x: 0,
+        y: 0,
+        width: 2,
+        height: 1,
+    });
+
+    let mut next = previous.clone();
+    next.clear_damage();
+    next.mark_damage(DamageRegion {
+        x: 4,
+        y: 2,
+        width: 2,
+        height: 1,
+    });
+
+    let plan = plan_terminal_canvas_diff(
+        Some(&previous),
+        &next,
+        TerminalDiffPlanning::SinglePass {
+            bounds: DiffBoundsMode::DamageRegionWhenSafe,
+            count_changed_cells: true,
+        },
+        TerminalCanvasDiffContext::default(),
+    );
+    assert_eq!(
+        plan.reason,
+        Some(TerminalCanvasRepaintReason::CurrentDamage)
+    );
+    assert_eq!(plan.changed_cells, Some(0));
+    assert_eq!(
+        plan.bounds,
+        Some(DamageRegion {
+            x: 0,
+            y: 0,
+            width: 6,
+            height: 3,
+        })
+    );
+    assert_eq!(plan.rows_scanned, 4);
+}
+
+#[test]
+fn test_plan_terminal_canvas_diff_ignores_zero_size_damage() {
+    let previous = Canvas::new(4, 2);
+    let mut next = previous.clone();
+    next.mark_damage(DamageRegion {
+        x: 1,
+        y: 1,
+        width: 0,
+        height: 1,
+    });
+    next.mark_damage(DamageRegion {
+        x: 1,
+        y: 1,
+        width: 1,
+        height: 0,
+    });
+
+    let plan = plan_terminal_canvas_diff(
+        Some(&previous),
+        &next,
+        TerminalDiffPlanning::SinglePass {
+            bounds: DiffBoundsMode::DamageRegionWhenSafe,
+            count_changed_cells: true,
+        },
+        TerminalCanvasDiffContext::default(),
+    );
+    assert!(!plan.should_repaint);
+    assert_eq!(plan.reason, None);
+    assert_eq!(plan.changed_cells, Some(0));
+    assert_eq!(plan.bounds, None);
+}
+
+#[test]
+fn test_plan_terminal_canvas_diff_resize_and_force_full_repaint_do_not_use_damage_bounds() {
+    let previous = Canvas::new(8, 2);
+    let mut damaged = previous.clone();
+    damaged.mark_damage(DamageRegion {
+        x: 2,
+        y: 0,
+        width: 2,
+        height: 1,
+    });
+
+    let resize = plan_terminal_canvas_diff(
+        Some(&previous),
+        &damaged,
+        TerminalDiffPlanning::SinglePass {
+            bounds: DiffBoundsMode::DamageRegionWhenSafe,
+            count_changed_cells: true,
+        },
+        TerminalCanvasDiffContext {
+            terminal_size_changed: true,
+            ..TerminalCanvasDiffContext::default()
+        },
+    );
+    assert_eq!(
+        resize.reason,
+        Some(TerminalCanvasRepaintReason::TerminalResized)
+    );
+    assert_eq!(resize.changed_cells, Some(0));
+    assert_eq!(resize.bounds, None);
+
+    let mut force_full = damaged.clone();
+    force_full.force_full_repaint();
+    let force = plan_terminal_canvas_diff(
+        Some(&previous),
+        &force_full,
+        TerminalDiffPlanning::SinglePass {
+            bounds: DiffBoundsMode::DamageRegionWhenSafe,
+            count_changed_cells: true,
+        },
+        TerminalCanvasDiffContext::default(),
+    );
+    assert_eq!(
+        force.reason,
+        Some(TerminalCanvasRepaintReason::ForceFullRepaint)
+    );
+    assert_eq!(force.changed_cells, Some(0));
+    assert_eq!(force.bounds, None);
 }
 
 #[test]

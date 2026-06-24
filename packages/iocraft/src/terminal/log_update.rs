@@ -468,31 +468,34 @@ pub fn plan_terminal_canvas_diff(
     };
 
     let forced_reason = forced_repaint_reason(previous, next, context);
+    let damage_union = damage_region_union(
+        previous.and_then(Canvas::damage_region),
+        next.damage_region(),
+    );
+    let damage_bounds_requested = bounds == DiffBoundsMode::DamageRegionWhenSafe;
+    let damage_bounds_eligible = forced_reason.is_some_and(can_use_damage_bounds_for_reason);
     let must_scan_for_canvas_change = forced_reason.is_none();
-    let must_scan_for_damage_bounds = bounds == DiffBoundsMode::DamageRegionWhenSafe
-        && damage_region_union(
-            previous.and_then(Canvas::damage_region),
-            next.damage_region(),
-        )
-        .is_some();
-    let should_scan =
-        must_scan_for_canvas_change || count_changed_cells || must_scan_for_damage_bounds;
+    let must_scan_for_damage_bounds =
+        damage_bounds_requested && damage_bounds_eligible && damage_union.is_some();
+    let should_count_for_safety = count_changed_cells || must_scan_for_damage_bounds;
+    let should_scan = must_scan_for_canvas_change || should_count_for_safety;
 
-    let scan = should_scan.then(|| scan_terminal_canvas_diff(previous, next, count_changed_cells));
+    let scan =
+        should_scan.then(|| scan_terminal_canvas_diff(previous, next, should_count_for_safety));
     let logical_changed = scan.as_ref().is_some_and(|scan| scan.logical_changed);
     let reason = forced_reason
         .or_else(|| logical_changed.then_some(TerminalCanvasRepaintReason::CanvasChanged));
     let changed_cells =
         count_changed_cells.then(|| scan.as_ref().map_or(0, |scan| scan.changed_cells));
     let damage_bounds =
-        if bounds == DiffBoundsMode::DamageRegionWhenSafe && changed_cells == Some(0) {
-            damage_region_union(
-                previous.and_then(Canvas::damage_region),
-                next.damage_region(),
-            )
+        if must_scan_for_damage_bounds && scan.as_ref().is_some_and(|scan| !scan.logical_changed) {
+            damage_union
         } else {
             None
         };
+    if let (Some(previous), Some(bounds)) = (previous, damage_bounds) {
+        let _ = scan_terminal_canvas_diff_in_bounds(previous, next, bounds, count_changed_cells);
+    }
 
     TerminalCanvasDiffPlan {
         planning,
@@ -545,6 +548,13 @@ fn forced_repaint_reason(
     }
 }
 
+fn can_use_damage_bounds_for_reason(reason: TerminalCanvasRepaintReason) -> bool {
+    matches!(
+        reason,
+        TerminalCanvasRepaintReason::CurrentDamage | TerminalCanvasRepaintReason::PreviousDamage
+    )
+}
+
 fn scan_terminal_canvas_diff(
     previous: Option<&Canvas>,
     next: &Canvas,
@@ -579,6 +589,24 @@ fn scan_terminal_canvas_diff(
             changed_cells: 0,
             rows_scanned,
         }
+    }
+}
+
+fn scan_terminal_canvas_diff_in_bounds(
+    previous: &Canvas,
+    next: &Canvas,
+    bounds: DamageRegion,
+    count_changed_cells: bool,
+) -> TerminalCanvasDiffScan {
+    let mut changed_cells = 0;
+    let logical_changed = previous.diff_each_in_bounds(next, bounds, |_| {
+        changed_cells += 1;
+        !count_changed_cells
+    });
+    TerminalCanvasDiffScan {
+        logical_changed: logical_changed || changed_cells > 0,
+        changed_cells,
+        rows_scanned: bounds.height,
     }
 }
 
