@@ -136,6 +136,7 @@ pub(crate) struct InstantiatedComponent {
     hooks: Vec<Box<dyn AnyHook>>,
     first_update: bool,
     has_transparent_layout: bool,
+    skip_child_poll: bool,
     pending_change: bool,
 }
 
@@ -149,6 +150,7 @@ impl InstantiatedComponent {
             hooks: Default::default(),
             first_update: true,
             has_transparent_layout: false,
+            skip_child_poll: false,
             pending_change: false,
         }
     }
@@ -185,6 +187,7 @@ impl InstantiatedComponent {
         self.hooks.post_component_update(&mut updater);
         self.first_update = false;
         self.has_transparent_layout = updater.has_transparent_layout();
+        self.skip_child_poll = updater.should_skip_child_poll();
         self.pending_change = false;
     }
 
@@ -239,7 +242,11 @@ impl InstantiatedComponent {
 
     fn poll_change(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
         let component_status = Pin::new(&mut *self.component).poll_change(cx);
-        let children_status = Pin::new(&mut self.children).poll_change(cx);
+        let children_status = if self.skip_child_poll {
+            Poll::Pending
+        } else {
+            Pin::new(&mut self.children).poll_change(cx)
+        };
         let hooks_status = Pin::new(&mut self.hooks).poll_change(cx);
         if component_status.is_ready() || children_status.is_ready() || hooks_status.is_ready() {
             self.pending_change = true;

@@ -291,6 +291,7 @@ pub use scroll_fast_path::*;
 pub struct ComponentUpdater<'a, 'b: 'a, 'c: 'a, 'w> {
     node_id: NodeId,
     transparent_layout: bool,
+    skip_child_poll: bool,
     children: &'a mut Components,
     unattached_child_node_ids: &'a mut Vec<NodeId>,
     context: &'a mut UpdateContext<'b, 'w>,
@@ -308,6 +309,7 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
         Self {
             node_id,
             transparent_layout: false,
+            skip_child_poll: false,
             children,
             unattached_child_node_ids,
             context,
@@ -499,6 +501,19 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
 
     pub(crate) fn has_transparent_layout(&self) -> bool {
         self.transparent_layout
+    }
+
+    pub(crate) fn should_skip_child_poll(&self) -> bool {
+        self.skip_child_poll
+    }
+
+    /// Sets whether retained children should be polled while this component is idle.
+    ///
+    /// This is an explicit opt-in escape hatch for wrappers that intentionally
+    /// freeze an offscreen subtree. Component and hook polling for the wrapper
+    /// itself still runs so lifecycle state can recover when the wrapper thaws.
+    pub fn set_skip_child_poll(&mut self, skip_child_poll: bool) {
+        self.skip_child_poll = skip_child_poll;
     }
 
     /// Returns whether any retained child component signaled an internal change.

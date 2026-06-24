@@ -25,6 +25,11 @@ pub struct OffscreenFreezeProps<'a> {
     /// Marks the restored cached region damaged. Defaults to `false` to keep
     /// native-scrollback prompt-only frames on the sparse terminal diff path.
     pub damage_on_restore: Option<bool>,
+
+    /// Skips polling the retained child subtree while frozen. Defaults to
+    /// `false`, preserving existing child subscription/timer polling unless the
+    /// caller explicitly opts into a harder freeze.
+    pub skip_poll: Option<bool>,
 }
 
 struct OffscreenFreezeSnapshot {
@@ -166,8 +171,10 @@ impl Component for OffscreenFreeze {
         draw_cache.terminal_rows = props.terminal_rows.unwrap_or(actual_rows);
         draw_cache.bypassed = in_virtual_list;
         draw_cache.damage_on_restore = props.damage_on_restore.unwrap_or(false);
+        let frozen = draw_cache.frozen && !in_virtual_list;
+        updater.set_skip_child_poll(frozen && props.skip_poll.unwrap_or(false));
 
-        if !draw_cache.frozen || in_virtual_list {
+        if !frozen {
             updater.update_children(props.children.iter_mut(), None);
         }
         // When offscreen, intentionally do not call update_children. The
@@ -181,7 +188,12 @@ impl Component for OffscreenFreeze {
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
+    use core::{
+        pin::Pin,
+        task::{Context as TaskContext, Poll},
+    };
     use futures::StreamExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[component]
     fn CountingChild(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
@@ -269,6 +281,215 @@ mod tests {
         assert!(
             rendered.starts_with("child renders=4"),
             "virtual-list context should keep updating offscreen children: {rendered:?}"
+        );
+    }
+
+    static DEFAULT_POLL_CHILD_POLLS: AtomicUsize = AtomicUsize::new(0);
+    static SKIP_POLL_CHILD_POLLS: AtomicUsize = AtomicUsize::new(0);
+    static VIRTUAL_POLL_CHILD_POLLS: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Default, Props)]
+    struct PollingChildProps;
+
+    macro_rules! polling_child {
+        ($name:ident, $counter:ident) => {
+            #[derive(Default)]
+            struct $name;
+
+            impl Component for $name {
+                type Props<'a> = PollingChildProps;
+
+                fn new(_props: &Self::Props<'_>) -> Self {
+                    Self
+                }
+
+                fn update(
+                    &mut self,
+                    _props: &mut Self::Props<'_>,
+                    _hooks: Hooks,
+                    updater: &mut ComponentUpdater,
+                ) {
+                    updater.update_children(
+                        std::iter::once(element!(Text(content: "poll child"))),
+                        None,
+                    );
+                }
+
+                fn poll_change(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> Poll<()> {
+                    let _ = self;
+                    $counter.fetch_add(1, Ordering::SeqCst);
+                    Poll::Pending
+                }
+            }
+        };
+    }
+
+    polling_child!(DefaultPollingChild, DEFAULT_POLL_CHILD_POLLS);
+    polling_child!(SkipPollingChild, SKIP_POLL_CHILD_POLLS);
+    polling_child!(VirtualPollingChild, VIRTUAL_POLL_CHILD_POLLS);
+
+    #[component]
+    fn DefaultPollFreezeApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut tick = hooks.use_state(|| 0u8);
+        if tick.get() < 4 {
+            tick += 1;
+        } else {
+            system.exit();
+        }
+
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                OffscreenFreeze(terminal_rows: Some(3)) {
+                    DefaultPollingChild
+                }
+                Text(content: "row 1")
+                Text(content: "row 2")
+                Text(content: "row 3")
+                Text(content: "row 4")
+                Text(content: "row 5")
+                Text(content: "row 6")
+                Text(content: "row 7")
+            }
+        }
+    }
+
+    #[component]
+    fn SkipPollFreezeApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut tick = hooks.use_state(|| 0u8);
+        if tick.get() < 4 {
+            tick += 1;
+        } else {
+            system.exit();
+        }
+
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                OffscreenFreeze(terminal_rows: Some(3), skip_poll: true) {
+                    SkipPollingChild
+                }
+                Text(content: "row 1")
+                Text(content: "row 2")
+                Text(content: "row 3")
+                Text(content: "row 4")
+                Text(content: "row 5")
+                Text(content: "row 6")
+                Text(content: "row 7")
+            }
+        }
+    }
+
+    #[test]
+    fn test_offscreen_freeze_skip_poll_is_opt_in() {
+        DEFAULT_POLL_CHILD_POLLS.store(0, Ordering::SeqCst);
+        SKIP_POLL_CHILD_POLLS.store(0, Ordering::SeqCst);
+
+        let _: Vec<_> = smol::block_on(
+            element!(DefaultPollFreezeApp)
+                .mock_terminal_render_loop(MockTerminalConfig::default())
+                .collect(),
+        );
+        let default_polls = DEFAULT_POLL_CHILD_POLLS.load(Ordering::SeqCst);
+
+        let _: Vec<_> = smol::block_on(
+            element!(SkipPollFreezeApp)
+                .mock_terminal_render_loop(MockTerminalConfig::default())
+                .collect(),
+        );
+        let skip_polls = SKIP_POLL_CHILD_POLLS.load(Ordering::SeqCst);
+
+        assert!(
+            default_polls > skip_polls,
+            "default frozen children should keep polling unless skip_poll is opted in: default={default_polls}, skip={skip_polls}"
+        );
+        assert!(
+            skip_polls <= 1,
+            "skip_poll should stop child polling after the wrapper has frozen: {skip_polls}"
+        );
+    }
+
+    #[component]
+    fn ThawingSkipPollFreezeApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut tick = hooks.use_state(|| 0u8);
+        if tick.get() < 5 {
+            tick += 1;
+        } else {
+            system.exit();
+        }
+        let terminal_rows = if tick.get() < 3 { 3 } else { 20 };
+
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                OffscreenFreeze(terminal_rows: Some(terminal_rows), skip_poll: true) {
+                    CountingChild
+                }
+                Text(content: "row 1")
+                Text(content: "row 2")
+                Text(content: "row 3")
+                Text(content: "row 4")
+                Text(content: "row 5")
+                Text(content: "row 6")
+                Text(content: "row 7")
+            }
+        }
+    }
+
+    #[test]
+    fn test_offscreen_freeze_skip_poll_thaws_and_updates_children() {
+        let canvases: Vec<_> = smol::block_on(
+            element!(ThawingSkipPollFreezeApp)
+                .mock_terminal_render_loop(MockTerminalConfig::default())
+                .collect(),
+        );
+        let rendered = canvases.last().unwrap().to_string();
+        assert!(
+            rendered.starts_with("child renders=4"),
+            "thawed skip_poll subtree should resume ordinary child updates: {rendered:?}"
+        );
+    }
+
+    #[component]
+    fn VirtualSkipPollFreezeApp(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
+        let mut system = hooks.use_context_mut::<SystemContext>();
+        let mut tick = hooks.use_state(|| 0u8);
+        if tick.get() < 4 {
+            tick += 1;
+        } else {
+            system.exit();
+        }
+
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                ContextProvider(value: Context::owned(InVirtualListContext)) {
+                    OffscreenFreeze(terminal_rows: Some(3), skip_poll: true) {
+                        VirtualPollingChild
+                    }
+                }
+                Text(content: "row 1")
+                Text(content: "row 2")
+                Text(content: "row 3")
+                Text(content: "row 4")
+                Text(content: "row 5")
+                Text(content: "row 6")
+                Text(content: "row 7")
+            }
+        }
+    }
+
+    #[test]
+    fn test_offscreen_freeze_skip_poll_keeps_virtual_list_bypass() {
+        VIRTUAL_POLL_CHILD_POLLS.store(0, Ordering::SeqCst);
+        let _: Vec<_> = smol::block_on(
+            element!(VirtualSkipPollFreezeApp)
+                .mock_terminal_render_loop(MockTerminalConfig::default())
+                .collect(),
+        );
+        let polls = VIRTUAL_POLL_CHILD_POLLS.load(Ordering::SeqCst);
+        assert!(
+            polls > 1,
+            "virtual-list bypass should keep polling even when skip_poll is requested: {polls}"
         );
     }
 }
