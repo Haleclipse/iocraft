@@ -466,6 +466,68 @@ pub struct ScrollFastPathTerminalFramePatchRequest {
     pub options: TerminalScrollHintPatchOptions,
 }
 
+/// Explicit terminal-side mode for applying a retained scroll fast-path frame.
+///
+/// The default is retained-canvas only. Main-screen callers can select
+/// [`Self::MainScreen`] to make the fullscreen boundary explicit and receive a
+/// `NotFullscreen` skip result without emitting DECSTBM. Only
+/// [`Self::Fullscreen`] can request terminal-side DECSTBM, and it still carries
+/// the synchronized-output gate that CC Ink calls `decstbmSafe`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScrollFastPathTerminalPatchMode {
+    /// Do not plan any terminal-side scroll patch.
+    #[default]
+    Disabled,
+    /// Explicit main-screen/native-scrollback mode. DECSTBM is never emitted.
+    MainScreen,
+    /// Fullscreen/alternate-screen mode with an explicit synchronized-output gate.
+    Fullscreen {
+        /// Previous/next retained screen bounds used to validate the scroll hint.
+        bounds: TerminalScrollHintBounds,
+        /// Whether the following scroll patch and repairs are written atomically.
+        synchronized_output: bool,
+    },
+}
+
+impl ScrollFastPathTerminalPatchMode {
+    /// Returns fullscreen mode with `decstbmSafe`/synchronized output enabled.
+    pub fn fullscreen_synchronized(bounds: TerminalScrollHintBounds) -> Self {
+        Self::Fullscreen {
+            bounds,
+            synchronized_output: true,
+        }
+    }
+
+    /// Returns fullscreen mode without synchronized output. This is useful for
+    /// tests and fallback planning; it must not emit DECSTBM.
+    pub fn fullscreen_unsynchronized(bounds: TerminalScrollHintBounds) -> Self {
+        Self::Fullscreen {
+            bounds,
+            synchronized_output: false,
+        }
+    }
+
+    fn terminal_patch_request(self) -> Option<ScrollFastPathTerminalFramePatchRequest> {
+        match self {
+            Self::Disabled => None,
+            Self::MainScreen => Some(ScrollFastPathTerminalFramePatchRequest {
+                bounds: TerminalScrollHintBounds::default(),
+                options: TerminalScrollHintPatchOptions::default(),
+            }),
+            Self::Fullscreen {
+                bounds,
+                synchronized_output,
+            } => Some(ScrollFastPathTerminalFramePatchRequest {
+                bounds,
+                options: TerminalScrollHintPatchOptions {
+                    fullscreen: true,
+                    synchronized_output,
+                },
+            }),
+        }
+    }
+}
+
 /// Outcome of planning a guarded fullscreen terminal patch for a retained scroll frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScrollFastPathTerminalFramePatchPlan<'a, K> {
@@ -602,6 +664,26 @@ pub fn apply_scroll_fast_path_frame_plan<'a, K>(
         terminal_patch,
         terminal_patch_skip_reason,
     })
+}
+
+/// Applies a retained scroll fast-path frame with an explicit terminal patch mode.
+///
+/// This is a small opt-in wrapper around [`apply_scroll_fast_path_frame_plan`]
+/// for callers that want the main-screen/fullscreen boundary encoded as an enum
+/// instead of passing raw patch requests. The default mode is canvas-only and
+/// never emits DECSTBM.
+pub fn apply_scroll_fast_path_frame_plan_with_terminal_mode<'a, K>(
+    next: &mut Canvas,
+    previous: &Canvas,
+    plan: &'a ScrollFastPathFramePlan<K>,
+    terminal_patch_mode: ScrollFastPathTerminalPatchMode,
+) -> Result<ScrollFastPathFrameApplication<'a, K>, TerminalScrollHintRejection> {
+    apply_scroll_fast_path_frame_plan(
+        next,
+        previous,
+        plan,
+        terminal_patch_mode.terminal_patch_request(),
+    )
 }
 
 /// Plans stable-row child repairs after a retained scroll blit/shift pass.

@@ -881,6 +881,114 @@ fn test_apply_scroll_fast_path_frame_plan_combines_canvas_and_terminal_patch() {
 }
 
 #[test]
+fn test_scroll_fast_path_terminal_patch_mode_keeps_decstbm_fullscreen_only() {
+    let mut previous = Canvas::new(6, 4);
+    {
+        let mut view = previous.subview_mut(0, 0, 0, 0, 6, 4);
+        for row in 0..4 {
+            view.set_text(
+                0,
+                row as isize,
+                &format!("r{row}"),
+                CanvasTextStyle::default(),
+            );
+        }
+    }
+    previous.clear_damage();
+
+    let frame_plan = ScrollFastPathFramePlan::<&'static str> {
+        delta: 1,
+        content_height_delta: 0,
+        viewport_stable: true,
+        content_delta_safe: true,
+        fast_path: Some(ScrollFastPathPlan {
+            blit_region: CachedClearRegion {
+                x: 0,
+                y: 0,
+                width: 6,
+                height: 4,
+            },
+            delta: 1,
+            edge_region: CachedClearRegion {
+                x: 0,
+                y: 3,
+                width: 6,
+                height: 1,
+            },
+            absolute_repair_regions: Vec::new(),
+        }),
+        child_repairs: Vec::new(),
+    };
+
+    let mut disabled = Canvas::new(6, 4);
+    let application = apply_scroll_fast_path_frame_plan_with_terminal_mode(
+        &mut disabled,
+        &previous,
+        &frame_plan,
+        ScrollFastPathTerminalPatchMode::default(),
+    )
+    .unwrap();
+    assert!(application.canvas_applied);
+    assert!(application.terminal_patch.is_none());
+    assert_eq!(application.terminal_patch_skip_reason, None);
+
+    let mut main_screen = Canvas::new(6, 4);
+    let application = apply_scroll_fast_path_frame_plan_with_terminal_mode(
+        &mut main_screen,
+        &previous,
+        &frame_plan,
+        ScrollFastPathTerminalPatchMode::MainScreen,
+    )
+    .unwrap();
+    assert!(application.canvas_applied);
+    assert!(application.terminal_patch.is_none());
+    assert_eq!(
+        application.terminal_patch_skip_reason,
+        Some(TerminalScrollHintPatchSkipReason::NotFullscreen),
+        "main-screen native scrollback must never enable DECSTBM"
+    );
+
+    let bounds = TerminalScrollHintBounds {
+        previous_screen_height: 4,
+        next_screen_height: 4,
+    };
+    let mut unsafe_fullscreen = Canvas::new(6, 4);
+    let application = apply_scroll_fast_path_frame_plan_with_terminal_mode(
+        &mut unsafe_fullscreen,
+        &previous,
+        &frame_plan,
+        ScrollFastPathTerminalPatchMode::fullscreen_unsynchronized(bounds),
+    )
+    .unwrap();
+    assert!(application.canvas_applied);
+    assert!(application.terminal_patch.is_none());
+    assert_eq!(
+        application.terminal_patch_skip_reason,
+        Some(TerminalScrollHintPatchSkipReason::NotSynchronized),
+        "fullscreen DECSTBM must fall back without synchronized-output safety"
+    );
+
+    let mut fullscreen = Canvas::new(6, 4);
+    let application = apply_scroll_fast_path_frame_plan_with_terminal_mode(
+        &mut fullscreen,
+        &previous,
+        &frame_plan,
+        ScrollFastPathTerminalPatchMode::fullscreen_synchronized(bounds),
+    )
+    .unwrap();
+    assert!(application.canvas_applied);
+    assert_eq!(application.terminal_patch_skip_reason, None);
+    assert_eq!(
+        application
+            .terminal_patch
+            .as_ref()
+            .unwrap()
+            .scroll_patch_ansi,
+        "\x1b[1;4r\x1b[1S\x1b[r\x1b[H"
+    );
+}
+
+#[test]
 fn test_retained_child_blit_plan_matches_cc_ink_contamination_guards() {
     let decisions = plan_retained_child_blits(
         false,
