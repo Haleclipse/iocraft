@@ -2,6 +2,75 @@ use super::super::*;
 use crate::prelude::*;
 
 #[test]
+fn test_renderer_optimization_mode_defaults_to_baseline() {
+    let mode = RendererOptimizationMode::default();
+    assert!(mode.is_baseline());
+    assert_eq!(mode.retained_config(), None);
+    assert!(!mode.dirty_tree_enabled());
+    assert!(!mode.allows_clean_blit(RendererCleanBlitGuard::safe()));
+}
+
+#[test]
+fn test_renderer_optimization_mode_retained_is_explicit() {
+    let dirty_only =
+        RendererOptimizationMode::Retained(RendererRetainedOptimizationConfig::dirty_tree_only());
+    assert!(!dirty_only.is_baseline());
+    assert!(dirty_only.dirty_tree_enabled());
+    assert!(!dirty_only.allows_clean_blit(RendererCleanBlitGuard::safe()));
+
+    let clean_blit = RendererOptimizationMode::retained_with_safe_clean_blit();
+    assert!(clean_blit.dirty_tree_enabled());
+    assert!(clean_blit.allows_clean_blit(RendererCleanBlitGuard::safe()));
+}
+
+#[test]
+fn test_renderer_clean_blit_guard_conditions_are_explicit() {
+    let mode = RendererOptimizationMode::retained_with_safe_clean_blit();
+    let safe = RendererCleanBlitGuard::safe();
+    assert!(mode.allows_clean_blit(safe));
+
+    let mut no_previous = safe;
+    no_previous.previous_screen_available = false;
+    assert!(!mode.allows_clean_blit(no_previous));
+
+    let mut dirty = safe;
+    dirty.node_dirty = true;
+    assert!(!mode.allows_clean_blit(dirty));
+
+    let mut forced_descent = safe;
+    forced_descent.skip_self_blit = true;
+    assert!(!mode.allows_clean_blit(forced_descent));
+
+    let mut scrolling = safe;
+    scrolling.pending_scroll_delta = true;
+    assert!(!mode.allows_clean_blit(scrolling));
+
+    let mut hidden = safe;
+    hidden.hidden = true;
+    assert!(!mode.allows_clean_blit(hidden));
+
+    let mut layout_shifted = safe;
+    layout_shifted.layout_shifted = true;
+    assert!(!mode.allows_clean_blit(layout_shifted));
+
+    let mut absolute_clear = safe;
+    absolute_clear.absolute_clear_this_frame = true;
+    assert!(!mode.allows_clean_blit(absolute_clear));
+
+    let mut absolute_removed = safe;
+    absolute_removed.absolute_removed_at_frame_start = true;
+    assert!(!mode.allows_clean_blit(absolute_removed));
+
+    let mut damaged = safe;
+    damaged.current_or_previous_damage = true;
+    assert!(!mode.allows_clean_blit(damaged));
+
+    let mut stale_generation = safe;
+    stale_generation.stable_generation = false;
+    assert!(!mode.allows_clean_blit(stale_generation));
+}
+
+#[test]
 fn test_renderer_node_generation_state_prevents_key_reuse_blits() {
     let mut generations = RendererNodeGenerationState::<&'static str>::new();
     let mut cache = RendererNodeCache::<RendererStableNodeId<&'static str>>::new();

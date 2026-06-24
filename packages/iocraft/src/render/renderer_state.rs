@@ -1,5 +1,164 @@
 use super::*;
 
+/// Explicit renderer optimization mode.
+///
+/// The default is [`Self::Baseline`], which preserves iocraft's existing full
+/// traversal/render behavior. Retained rendering primitives are only enabled
+/// when callers opt in with [`Self::Retained`]; this keeps benchmark and bug
+/// bisect paths available while exposing a stable configuration boundary for
+/// dirty-tree and clean-blit experiments.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RendererOptimizationMode {
+    /// Preserve the existing renderer path.
+    #[default]
+    Baseline,
+    /// Enable explicit retained-renderer planning helpers.
+    Retained(RendererRetainedOptimizationConfig),
+}
+
+impl RendererOptimizationMode {
+    /// Returns a retained mode with safe clean-blit guards enabled.
+    pub fn retained_with_safe_clean_blit() -> Self {
+        Self::Retained(RendererRetainedOptimizationConfig::safe_clean_blit())
+    }
+
+    /// Returns whether this mode keeps the baseline renderer path.
+    pub fn is_baseline(self) -> bool {
+        matches!(self, Self::Baseline)
+    }
+
+    /// Returns the retained configuration, if retained mode is enabled.
+    pub fn retained_config(self) -> Option<RendererRetainedOptimizationConfig> {
+        match self {
+            Self::Baseline => None,
+            Self::Retained(config) => Some(config),
+        }
+    }
+
+    /// Returns whether dirty-tree invalidation is enabled.
+    pub fn dirty_tree_enabled(self) -> bool {
+        self.retained_config()
+            .is_some_and(|config| config.dirty_tree)
+    }
+
+    /// Returns whether a clean subtree blit is allowed under the supplied guard.
+    pub fn allows_clean_blit(self, guard: RendererCleanBlitGuard) -> bool {
+        self.retained_config()
+            .is_some_and(|config| config.allows_clean_blit(guard))
+    }
+}
+
+/// Retained renderer optimization switches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RendererRetainedOptimizationConfig {
+    /// Whether callers should use [`RendererDirtyTree`] for ancestor invalidation.
+    pub dirty_tree: bool,
+    /// Clean subtree blit policy.
+    pub clean_blit: RendererCleanBlitMode,
+}
+
+impl Default for RendererRetainedOptimizationConfig {
+    fn default() -> Self {
+        Self {
+            dirty_tree: true,
+            clean_blit: RendererCleanBlitMode::Safe,
+        }
+    }
+}
+
+impl RendererRetainedOptimizationConfig {
+    /// Enables retained dirty-tree planning without clean blits.
+    pub fn dirty_tree_only() -> Self {
+        Self {
+            dirty_tree: true,
+            clean_blit: RendererCleanBlitMode::Disabled,
+        }
+    }
+
+    /// Enables retained dirty-tree planning and safe clean-blit guards.
+    pub fn safe_clean_blit() -> Self {
+        Self::default()
+    }
+
+    /// Returns whether this retained config allows a clean subtree blit.
+    pub fn allows_clean_blit(self, guard: RendererCleanBlitGuard) -> bool {
+        self.clean_blit == RendererCleanBlitMode::Safe && guard.is_safe_for_clean_blit()
+    }
+}
+
+/// Clean subtree blit policy for retained renderer experiments.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RendererCleanBlitMode {
+    /// Do not perform clean subtree blits.
+    #[default]
+    Disabled,
+    /// Allow clean blits only when all explicit safety guards pass.
+    Safe,
+}
+
+/// Explicit guard inputs for a clean subtree blit decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RendererCleanBlitGuard {
+    /// A trustworthy previous retained screen/canvas is available.
+    pub previous_screen_available: bool,
+    /// The node/subtree is dirty this frame.
+    pub node_dirty: bool,
+    /// The caller requested descent instead of self blit.
+    pub skip_self_blit: bool,
+    /// Render-time scroll draining is pending for the node.
+    pub pending_scroll_delta: bool,
+    /// The node is hidden/display:none.
+    pub hidden: bool,
+    /// Layout shifted since the previous retained frame.
+    pub layout_shifted: bool,
+    /// An absolute-positioned clear happened in this frame.
+    pub absolute_clear_this_frame: bool,
+    /// An absolute-positioned node removal contaminated previous-frame pixels.
+    pub absolute_removed_at_frame_start: bool,
+    /// Current or previous retained canvas carries damage metadata.
+    pub current_or_previous_damage: bool,
+    /// The stable node generation still matches the cached retained entry.
+    pub stable_generation: bool,
+}
+
+impl RendererCleanBlitGuard {
+    /// Returns a fully safe clean-blit guard.
+    pub fn safe() -> Self {
+        Self {
+            previous_screen_available: true,
+            node_dirty: false,
+            skip_self_blit: false,
+            pending_scroll_delta: false,
+            hidden: false,
+            layout_shifted: false,
+            absolute_clear_this_frame: false,
+            absolute_removed_at_frame_start: false,
+            current_or_previous_damage: false,
+            stable_generation: true,
+        }
+    }
+
+    /// Returns whether all explicit guard conditions allow a clean blit.
+    pub fn is_safe_for_clean_blit(self) -> bool {
+        self.previous_screen_available
+            && !self.node_dirty
+            && !self.skip_self_blit
+            && !self.pending_scroll_delta
+            && !self.hidden
+            && !self.layout_shifted
+            && !self.absolute_clear_this_frame
+            && !self.absolute_removed_at_frame_start
+            && !self.current_or_previous_damage
+            && self.stable_generation
+    }
+}
+
+impl Default for RendererCleanBlitGuard {
+    fn default() -> Self {
+        Self::safe()
+    }
+}
+
 /// Input for [`RendererRetainedTreeState::plan_node`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RetainedTreeNodeInput<K> {
