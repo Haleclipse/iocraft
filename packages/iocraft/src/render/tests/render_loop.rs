@@ -977,6 +977,7 @@ fn test_frame_profile_stats_accumulates_benchmark_metrics() {
             changed_cell_scan: Duration::from_millis(4),
             repaint_check: Duration::from_millis(5),
             terminal_write: Duration::from_millis(6),
+            diff_rows_scanned: 2,
             changed_cells: 5,
             canvas_width: 10,
             canvas_height: 2,
@@ -999,6 +1000,7 @@ fn test_frame_profile_stats_accumulates_benchmark_metrics() {
             changed_cell_scan: Duration::from_millis(6),
             repaint_check: Duration::from_millis(7),
             terminal_write: Duration::from_millis(8),
+            diff_rows_scanned: 4,
             changed_cells: 9,
             canvas_width: 10,
             canvas_height: 2,
@@ -1016,6 +1018,8 @@ fn test_frame_profile_stats_accumulates_benchmark_metrics() {
     assert_eq!(stats.average_changed_cell_scan(), Duration::from_millis(5));
     assert_eq!(stats.average_repaint_check(), Duration::from_millis(6));
     assert_eq!(stats.average_terminal_write(), Duration::from_millis(7));
+    assert_eq!(stats.total_diff_rows_scanned, 6);
+    assert_eq!(stats.max_diff_rows_scanned, 4);
     assert_eq!(stats.total_changed_cells, 14);
     assert_eq!(stats.max_changed_cells, 9);
     assert_eq!(stats.average_changed_cells(), 7.0);
@@ -1068,6 +1072,42 @@ async fn test_frame_profile_callback_reports_repaint_phases() {
     assert!(
         first.phases.repaint_check > Duration::ZERO,
         "profile should include repaint guard/equality timing"
+    );
+    assert_eq!(
+        first.phases.diff_rows_scanned, 0,
+        "baseline render loop does not opt into single-pass row planning"
+    );
+}
+
+#[apply(test!)]
+async fn test_mock_terminal_render_loop_with_single_pass_diff_planning_reports_rows() {
+    let stats = std::sync::Arc::new(std::sync::Mutex::new(RenderFrameProfileStats::default()));
+    let stats_for_callback = stats.clone();
+    let canvases: Vec<_> = element!(MyComponent)
+        .mock_terminal_render_loop_with_profile(
+            MockTerminalConfig::default().with_canvas_diff_planning(
+                TerminalDiffPlanning::SinglePass {
+                    bounds: DiffBoundsMode::FullCanvas,
+                    count_changed_cells: true,
+                },
+            ),
+            move |event| {
+                stats_for_callback.lock().unwrap().record(&event);
+            },
+        )
+        .collect()
+        .await;
+
+    let stats = stats.lock().unwrap();
+    assert_eq!(stats.frames, canvases.len());
+    assert!(stats.repaint_frames > 0);
+    assert!(
+        stats.max_diff_rows_scanned > 0,
+        "single-pass diff planning should report retained rows scanned"
+    );
+    assert!(
+        stats.max_changed_cells > 0,
+        "single-pass diff planning should preserve changed-cell profile counts"
     );
 }
 

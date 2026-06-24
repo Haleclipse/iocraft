@@ -6,11 +6,12 @@ use crate::{
     multimap::AppendOnlyMultimap,
     props::AnyProps,
     terminal::{
-        plan_terminal_scroll_hint_patch, terminal_scroll_hint_to_ansi, MockTerminalConfig,
-        MockTerminalOutputStream, PendingTerminalFlush, PendingTerminalQuery, Terminal,
-        TerminalEvents, TerminalQuery, TerminalScrollHintBounds, TerminalScrollHintPatchOptions,
-        TerminalScrollHintPatchPlan, TerminalScrollHintPatchSkipReason,
-        TerminalScrollHintRejection,
+        plan_terminal_canvas_diff, plan_terminal_scroll_hint_patch, terminal_scroll_hint_to_ansi,
+        MockTerminalConfig, MockTerminalOutputStream, PendingTerminalFlush, PendingTerminalQuery,
+        Terminal, TerminalCanvasDiffContext, TerminalCanvasDiffTarget, TerminalCanvasRepaintReason,
+        TerminalDiffPlanning, TerminalEvents, TerminalQuery, TerminalScrollHintBounds,
+        TerminalScrollHintPatchOptions, TerminalScrollHintPatchPlan,
+        TerminalScrollHintPatchSkipReason, TerminalScrollHintRejection,
     },
 };
 use core::{
@@ -75,6 +76,8 @@ pub struct RenderFramePhases {
     pub repaint_check: Duration,
     /// Terminal diff/write/cursor-positioning time.
     pub terminal_write: Duration,
+    /// Number of retained-canvas rows scanned by the active diff planner.
+    pub diff_rows_scanned: usize,
     /// Number of retained-canvas cells that differed from the previous frame.
     pub changed_cells: usize,
     /// Width of the rendered canvas in terminal cells.
@@ -112,6 +115,10 @@ pub struct RenderFrameProfileStats {
     pub total_repaint_check: Duration,
     /// Total terminal diff/write/cursor-positioning time.
     pub total_terminal_write: Duration,
+    /// Total retained-canvas rows scanned by the active diff planner.
+    pub total_diff_rows_scanned: usize,
+    /// Maximum retained-canvas rows scanned by the active diff planner in any frame.
+    pub max_diff_rows_scanned: usize,
     /// Sum of retained-canvas changed cells across frames.
     pub total_changed_cells: usize,
     /// Maximum retained-canvas changed cells in any frame.
@@ -136,6 +143,12 @@ impl RenderFrameProfileStats {
         );
         saturating_duration_add(&mut self.total_repaint_check, event.phases.repaint_check);
         saturating_duration_add(&mut self.total_terminal_write, event.phases.terminal_write);
+        self.total_diff_rows_scanned = self
+            .total_diff_rows_scanned
+            .saturating_add(event.phases.diff_rows_scanned);
+        self.max_diff_rows_scanned = self
+            .max_diff_rows_scanned
+            .max(event.phases.diff_rows_scanned);
         self.total_changed_cells = self
             .total_changed_cells
             .saturating_add(event.phases.changed_cells);
@@ -1374,14 +1387,70 @@ impl<'a> Tree<'a> {
                     Some(&mut term),
                     profile_enabled,
                 );
-                let changed_cell_scan_start = profile_enabled.then(std::time::Instant::now);
-                let changed_cells = if profile_enabled {
-                    count_changed_cells(prev_canvas.as_ref(), &output.canvas)
-                } else {
-                    0
-                };
-                frame_phases.changed_cell_scan =
-                    changed_cell_scan_start.map_or(Duration::ZERO, |start| start.elapsed());
+                let terminal_diff_planning = term.canvas_diff_planning();
+                let (should_repaint, repaint_reason, changed_cells, diff_rows_scanned) =
+                    if matches!(
+                        terminal_diff_planning,
+                        TerminalDiffPlanning::SinglePass { .. }
+                    ) {
+                        let repaint_check_start = profile_enabled.then(std::time::Instant::now);
+                        let plan = plan_terminal_canvas_diff(
+                            prev_canvas.as_ref(),
+                            &output.canvas,
+                            terminal_diff_planning,
+                            TerminalCanvasDiffContext {
+                                terminal_cleared: output.did_clear_terminal_output,
+                                alternate_screen_changed: output.alternate_screen_changed,
+                                terminal_size_changed,
+                                target: if term.is_fullscreen() {
+                                    TerminalCanvasDiffTarget::Fullscreen
+                                } else {
+                                    TerminalCanvasDiffTarget::MainScreen
+                                },
+                            },
+                        );
+                        frame_phases.repaint_check =
+                            repaint_check_start.map_or(Duration::ZERO, |start| start.elapsed());
+                        (
+                            plan.should_repaint,
+                            plan.reason
+                                .map(debug_repaint_reason_from_terminal_plan)
+                                .unwrap_or(DebugRepaintReason::CanvasChanged),
+                            plan.changed_cells.unwrap_or(0),
+                            plan.rows_scanned,
+                        )
+                    } else {
+                        let changed_cell_scan_start = profile_enabled.then(std::time::Instant::now);
+                        let changed_cells = if profile_enabled {
+                            count_changed_cells(prev_canvas.as_ref(), &output.canvas)
+                        } else {
+                            0
+                        };
+                        frame_phases.changed_cell_scan =
+                            changed_cell_scan_start.map_or(Duration::ZERO, |start| start.elapsed());
+                        let repaint_check_start = profile_enabled.then(std::time::Instant::now);
+                        let should_repaint = output.did_clear_terminal_output
+                            || output.alternate_screen_changed
+                            || terminal_size_changed
+                            || output.canvas.should_force_full_repaint()
+                            || output.canvas.has_damage()
+                            || prev_canvas
+                                .as_ref()
+                                .is_some_and(|canvas| canvas.has_damage())
+                            || prev_canvas.as_ref() != Some(&output.canvas);
+                        frame_phases.repaint_check =
+                            repaint_check_start.map_or(Duration::ZERO, |start| start.elapsed());
+                        (
+                            should_repaint,
+                            classify_debug_repaint_reason(
+                                &output,
+                                prev_canvas.as_ref(),
+                                terminal_size_changed,
+                            ),
+                            changed_cells,
+                            0,
+                        )
+                    };
                 debug_log_render_frame(
                     &output,
                     prev_canvas.as_ref(),
@@ -1389,27 +1458,10 @@ impl<'a> Tree<'a> {
                     terminal_size_changed,
                     changed_cells,
                 );
-                let repaint_check_start = profile_enabled.then(std::time::Instant::now);
-                let should_repaint = output.did_clear_terminal_output
-                    || output.alternate_screen_changed
-                    || terminal_size_changed
-                    || output.canvas.should_force_full_repaint()
-                    || output.canvas.has_damage()
-                    || prev_canvas
-                        .as_ref()
-                        .is_some_and(|canvas| canvas.has_damage())
-                    || prev_canvas.as_ref() != Some(&output.canvas);
-                frame_phases.repaint_check =
-                    repaint_check_start.map_or(Duration::ZERO, |start| start.elapsed());
                 let previous_damage = prev_canvas.as_ref().and_then(Canvas::damage_region);
                 if should_repaint {
-                    let reason = classify_debug_repaint_reason(
-                        &output,
-                        prev_canvas.as_ref(),
-                        terminal_size_changed,
-                    );
                     repaint = Some(DebugRepaintInfo {
-                        reason,
+                        reason: repaint_reason,
                         damage: output.canvas.damage_region(),
                         previous_damage,
                         changed_cells,
@@ -1434,6 +1486,7 @@ impl<'a> Tree<'a> {
                 frame_phases.update = output.phase_profile.update;
                 frame_phases.layout = output.phase_profile.layout;
                 frame_phases.draw = output.phase_profile.draw;
+                frame_phases.diff_rows_scanned = diff_rows_scanned;
                 frame_phases.changed_cells = changed_cells;
                 frame_phases.canvas_width = output.canvas.width();
                 frame_phases.canvas_height = output.canvas.height();
@@ -1709,6 +1762,23 @@ fn classify_debug_repaint_reason(
         DebugRepaintReason::FirstFrame
     } else {
         DebugRepaintReason::CanvasChanged
+    }
+}
+
+fn debug_repaint_reason_from_terminal_plan(
+    reason: TerminalCanvasRepaintReason,
+) -> DebugRepaintReason {
+    match reason {
+        TerminalCanvasRepaintReason::FirstFrame => DebugRepaintReason::FirstFrame,
+        TerminalCanvasRepaintReason::TerminalCleared => DebugRepaintReason::TerminalCleared,
+        TerminalCanvasRepaintReason::AlternateScreenChanged => {
+            DebugRepaintReason::AlternateScreenChanged
+        }
+        TerminalCanvasRepaintReason::TerminalResized => DebugRepaintReason::TerminalResized,
+        TerminalCanvasRepaintReason::ForceFullRepaint => DebugRepaintReason::ForceFullRepaint,
+        TerminalCanvasRepaintReason::CurrentDamage => DebugRepaintReason::CurrentDamage,
+        TerminalCanvasRepaintReason::PreviousDamage => DebugRepaintReason::PreviousDamage,
+        TerminalCanvasRepaintReason::CanvasChanged => DebugRepaintReason::CanvasChanged,
     }
 }
 

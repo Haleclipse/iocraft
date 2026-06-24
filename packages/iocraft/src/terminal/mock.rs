@@ -28,6 +28,8 @@ pub struct MockTerminalConfig {
     pub ignore_ctrl_c: bool,
     /// Whether Ctrl+Z should suspend instead of being delivered as ordinary input.
     pub suspend_on_ctrl_z: bool,
+    /// Opt-in retained-canvas diff planning mode for render-loop tests.
+    pub canvas_diff_planning: TerminalDiffPlanning,
 }
 
 impl MockTerminalConfig {
@@ -39,6 +41,7 @@ impl MockTerminalConfig {
             size: None,
             ignore_ctrl_c: false,
             suspend_on_ctrl_z: false,
+            canvas_diff_planning: TerminalDiffPlanning::Baseline,
         }
     }
 
@@ -71,6 +74,12 @@ impl MockTerminalConfig {
         self.suspend_on_ctrl_z = suspend_on_ctrl_z;
         self
     }
+
+    /// Sets the opt-in retained-canvas diff planning mode for this mock render loop.
+    pub fn with_canvas_diff_planning(mut self, planning: TerminalDiffPlanning) -> Self {
+        self.canvas_diff_planning = planning;
+        self
+    }
 }
 
 impl Default for MockTerminalConfig {
@@ -81,6 +90,7 @@ impl Default for MockTerminalConfig {
             size: None,
             ignore_ctrl_c: false,
             suspend_on_ctrl_z: false,
+            canvas_diff_planning: TerminalDiffPlanning::Baseline,
         }
     }
 }

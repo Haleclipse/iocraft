@@ -279,6 +279,7 @@ pub(crate) struct Terminal<'a> {
     received_ctrl_c: bool,
     ignore_ctrl_c: bool,
     suspend_on_ctrl_z: bool,
+    canvas_diff_planning: TerminalDiffPlanning,
     synchronized_update_depth: usize,
     synchronized_update_started: bool,
     synchronized_update_supported: bool,
@@ -311,6 +312,7 @@ impl<'a> Terminal<'a> {
             received_ctrl_c: false,
             ignore_ctrl_c: false,
             suspend_on_ctrl_z: false,
+            canvas_diff_planning: TerminalDiffPlanning::Baseline,
             synchronized_update_depth: 0,
             synchronized_update_started: false,
             synchronized_update_supported: is_synchronized_output_supported(),
@@ -354,6 +356,14 @@ impl<'a> Terminal<'a> {
 
     pub fn set_raw_mode_enabled(&mut self, raw_mode_enabled: bool) -> io::Result<()> {
         self.inner.set_raw_mode_enabled(raw_mode_enabled)
+    }
+
+    pub fn set_canvas_diff_planning(&mut self, planning: TerminalDiffPlanning) {
+        self.canvas_diff_planning = planning;
+    }
+
+    pub fn canvas_diff_planning(&self) -> TerminalDiffPlanning {
+        self.canvas_diff_planning
     }
 
     pub fn is_fullscreen(&self) -> bool {
@@ -773,6 +783,7 @@ impl Terminal<'static> {
     pub fn mock(config: MockTerminalConfig) -> (Self, MockTerminalOutputStream) {
         let ignore_ctrl_c = config.ignore_ctrl_c;
         let suspend_on_ctrl_z = config.suspend_on_ctrl_z;
+        let canvas_diff_planning = config.canvas_diff_planning;
         let (term, output_stream) = MockTerminal::new(config);
         let base_fullscreen = term.fullscreen;
         (
@@ -790,6 +801,7 @@ impl Terminal<'static> {
                 received_ctrl_c: false,
                 ignore_ctrl_c,
                 suspend_on_ctrl_z,
+                canvas_diff_planning,
                 synchronized_update_depth: 0,
                 synchronized_update_started: false,
                 synchronized_update_supported: true,

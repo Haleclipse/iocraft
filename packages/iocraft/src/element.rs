@@ -4,7 +4,7 @@ use crate::{
     mock_terminal_render_loop, mock_terminal_render_loop_with_profile,
     props::AnyProps,
     render, terminal_render_loop, Canvas, FrameProfileCallback, MockTerminalConfig,
-    RenderFrameProfile, Terminal, TextMatchPosition,
+    RenderFrameProfile, Terminal, TerminalDiffPlanning, TextMatchPosition,
 };
 use crossterm::terminal;
 use futures::Stream;
@@ -367,6 +367,7 @@ enum RenderLoopFutureState<'a, E: ElementExt> {
         stderr_writer: Option<Box<dyn Write + Send + 'a>>,
         throttle: Option<std::time::Duration>,
         frame_profile: Option<FrameProfileCallback<'a>>,
+        terminal_diff_planning: TerminalDiffPlanning,
         element: &'a mut E,
     },
     Running(Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>),
@@ -400,6 +401,7 @@ impl<'a, E: ElementExt + 'a> RenderLoopFuture<'a, E> {
                 stderr_writer: None,
                 throttle: Some(FRAME_INTERVAL),
                 frame_profile: None,
+                terminal_diff_planning: TerminalDiffPlanning::Baseline,
                 element,
             },
         }
@@ -451,6 +453,25 @@ impl<'a, E: ElementExt + 'a> RenderLoopFuture<'a, E> {
                 *frame_profile = Some(Box::new(callback));
             }
             _ => panic!("on_frame_profile() must be called before polling the future"),
+        }
+        self
+    }
+
+    /// Selects an opt-in retained-canvas diff planning mode for this render loop.
+    ///
+    /// The default is [`TerminalDiffPlanning::Baseline`], which preserves the
+    /// existing safe writer path. Benchmark and debugging harnesses can opt into
+    /// [`TerminalDiffPlanning::SinglePass`] to compare scan counts and repaint
+    /// classification without making the optimization the framework default.
+    pub fn terminal_diff_planning(mut self, planning: TerminalDiffPlanning) -> Self {
+        match &mut self.state {
+            RenderLoopFutureState::Init {
+                terminal_diff_planning,
+                ..
+            } => {
+                *terminal_diff_planning = planning;
+            }
+            _ => panic!("terminal_diff_planning() must be called before polling the future"),
         }
         self
     }
@@ -611,6 +632,7 @@ impl<'a, E: ElementExt + Send + 'a> Future for RenderLoopFuture<'a, E> {
                         stderr_writer,
                         throttle,
                         frame_profile,
+                        terminal_diff_planning,
                         element,
                     ) = match std::mem::replace(&mut self.state, RenderLoopFutureState::Empty) {
                         RenderLoopFutureState::Init {
@@ -623,6 +645,7 @@ impl<'a, E: ElementExt + Send + 'a> Future for RenderLoopFuture<'a, E> {
                             stderr_writer,
                             throttle,
                             frame_profile,
+                            terminal_diff_planning,
                             element,
                         } => (
                             fullscreen,
@@ -634,6 +657,7 @@ impl<'a, E: ElementExt + Send + 'a> Future for RenderLoopFuture<'a, E> {
                             stderr_writer,
                             throttle,
                             frame_profile,
+                            terminal_diff_planning,
                             element,
                         ),
                         _ => unreachable!(),
@@ -665,6 +689,7 @@ impl<'a, E: ElementExt + Send + 'a> Future for RenderLoopFuture<'a, E> {
                     if suspend_on_ctrl_z {
                         terminal.suspend_on_ctrl_z();
                     }
+                    terminal.set_canvas_diff_planning(terminal_diff_planning);
                     let fut = Box::pin(terminal_render_loop(
                         element,
                         terminal,
