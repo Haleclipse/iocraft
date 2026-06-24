@@ -280,6 +280,8 @@ pub(crate) struct Terminal<'a> {
     ignore_ctrl_c: bool,
     suspend_on_ctrl_z: bool,
     canvas_diff_planning: TerminalDiffPlanning,
+    input_backend: TerminalInputBackend,
+    raw_input_session_request: Option<TerminalRawInputSessionOptions>,
     synchronized_update_depth: usize,
     synchronized_update_started: bool,
     synchronized_update_supported: bool,
@@ -313,6 +315,8 @@ impl<'a> Terminal<'a> {
             ignore_ctrl_c: false,
             suspend_on_ctrl_z: false,
             canvas_diff_planning: TerminalDiffPlanning::Baseline,
+            input_backend: TerminalInputBackend::Crossterm,
+            raw_input_session_request: None,
             synchronized_update_depth: 0,
             synchronized_update_started: false,
             synchronized_update_supported: is_synchronized_output_supported(),
@@ -364,6 +368,21 @@ impl<'a> Terminal<'a> {
 
     pub fn canvas_diff_planning(&self) -> TerminalDiffPlanning {
         self.canvas_diff_planning
+    }
+
+    pub fn set_input_backend(&mut self, backend: TerminalInputBackend) {
+        self.input_backend = backend;
+        self.raw_input_session_request = None;
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn input_backend(&self) -> TerminalInputBackend {
+        self.input_backend
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn raw_input_session_request(&self) -> Option<TerminalRawInputSessionOptions> {
+        self.raw_input_session_request
     }
 
     pub fn is_fullscreen(&self) -> bool {
@@ -642,7 +661,15 @@ impl<'a> Terminal<'a> {
 
     pub fn start_event_stream(&mut self) -> io::Result<()> {
         if self.event_stream.is_none() {
-            self.event_stream = Some(self.inner.event_stream()?);
+            match self.input_backend {
+                TerminalInputBackend::Crossterm => {
+                    self.event_stream = Some(self.inner.event_stream()?);
+                }
+                TerminalInputBackend::RawInput(options) => {
+                    self.raw_input_session_request = Some(options);
+                    self.event_stream = Some(stream::pending().boxed());
+                }
+            }
         }
         Ok(())
     }
@@ -784,6 +811,7 @@ impl Terminal<'static> {
         let ignore_ctrl_c = config.ignore_ctrl_c;
         let suspend_on_ctrl_z = config.suspend_on_ctrl_z;
         let canvas_diff_planning = config.canvas_diff_planning;
+        let input_backend = config.input_backend;
         let (term, output_stream) = MockTerminal::new(config);
         let base_fullscreen = term.fullscreen;
         (
@@ -802,6 +830,8 @@ impl Terminal<'static> {
                 ignore_ctrl_c,
                 suspend_on_ctrl_z,
                 canvas_diff_planning,
+                input_backend,
+                raw_input_session_request: None,
                 synchronized_update_depth: 0,
                 synchronized_update_started: false,
                 synchronized_update_supported: true,

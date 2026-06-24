@@ -30,6 +30,8 @@ pub struct MockTerminalConfig {
     pub suspend_on_ctrl_z: bool,
     /// Opt-in retained-canvas diff planning mode for render-loop tests.
     pub canvas_diff_planning: TerminalDiffPlanning,
+    /// Opt-in input backend mode for render-loop tests.
+    pub input_backend: TerminalInputBackend,
 }
 
 impl MockTerminalConfig {
@@ -42,6 +44,7 @@ impl MockTerminalConfig {
             ignore_ctrl_c: false,
             suspend_on_ctrl_z: false,
             canvas_diff_planning: TerminalDiffPlanning::Baseline,
+            input_backend: TerminalInputBackend::Crossterm,
         }
     }
 
@@ -80,6 +83,12 @@ impl MockTerminalConfig {
         self.canvas_diff_planning = planning;
         self
     }
+
+    /// Sets the opt-in input backend mode for this mock render loop.
+    pub fn with_input_backend(mut self, input_backend: TerminalInputBackend) -> Self {
+        self.input_backend = input_backend;
+        self
+    }
 }
 
 impl Default for MockTerminalConfig {
@@ -91,6 +100,7 @@ impl Default for MockTerminalConfig {
             ignore_ctrl_c: false,
             suspend_on_ctrl_z: false,
             canvas_diff_planning: TerminalDiffPlanning::Baseline,
+            input_backend: TerminalInputBackend::Crossterm,
         }
     }
 }

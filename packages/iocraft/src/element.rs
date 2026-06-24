@@ -4,7 +4,8 @@ use crate::{
     mock_terminal_render_loop, mock_terminal_render_loop_with_profile,
     props::AnyProps,
     render, terminal_render_loop, Canvas, FrameProfileCallback, MockTerminalConfig,
-    RenderFrameProfile, Terminal, TerminalDiffPlanning, TextMatchPosition,
+    RenderFrameProfile, Terminal, TerminalDiffPlanning, TerminalInputBackend,
+    TerminalRawInputSessionOptions, TextMatchPosition,
 };
 use crossterm::terminal;
 use futures::Stream;
@@ -368,6 +369,7 @@ enum RenderLoopFutureState<'a, E: ElementExt> {
         throttle: Option<std::time::Duration>,
         frame_profile: Option<FrameProfileCallback<'a>>,
         terminal_diff_planning: TerminalDiffPlanning,
+        input_backend: TerminalInputBackend,
         element: &'a mut E,
     },
     Running(Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>),
@@ -402,6 +404,7 @@ impl<'a, E: ElementExt + 'a> RenderLoopFuture<'a, E> {
                 throttle: Some(FRAME_INTERVAL),
                 frame_profile: None,
                 terminal_diff_planning: TerminalDiffPlanning::Baseline,
+                input_backend: TerminalInputBackend::Crossterm,
                 element,
             },
         }
@@ -474,6 +477,30 @@ impl<'a, E: ElementExt + 'a> RenderLoopFuture<'a, E> {
             _ => panic!("terminal_diff_planning() must be called before polling the future"),
         }
         self
+    }
+
+    /// Selects the input backend for this render loop.
+    ///
+    /// The default is [`TerminalInputBackend::Crossterm`]. Raw-input takeover is
+    /// intentionally explicit and only records the requested
+    /// [`TerminalRawInputSessionOptions`]; applications that opt in remain
+    /// responsible for feeding parsed events and for enabling OS raw mode if
+    /// they requested it.
+    pub fn input_backend(mut self, input_backend: TerminalInputBackend) -> Self {
+        match &mut self.state {
+            RenderLoopFutureState::Init {
+                input_backend: b, ..
+            } => {
+                *b = input_backend;
+            }
+            _ => panic!("input_backend() must be called before polling the future"),
+        }
+        self
+    }
+
+    /// Selects a caller-owned raw-input backend for this render loop.
+    pub fn raw_input_backend(self, options: TerminalRawInputSessionOptions) -> Self {
+        self.input_backend(TerminalInputBackend::RawInput(options))
     }
 
     /// Renders the element as fullscreen in a loop, allowing it to be dynamic and interactive.
@@ -633,6 +660,7 @@ impl<'a, E: ElementExt + Send + 'a> Future for RenderLoopFuture<'a, E> {
                         throttle,
                         frame_profile,
                         terminal_diff_planning,
+                        input_backend,
                         element,
                     ) = match std::mem::replace(&mut self.state, RenderLoopFutureState::Empty) {
                         RenderLoopFutureState::Init {
@@ -646,6 +674,7 @@ impl<'a, E: ElementExt + Send + 'a> Future for RenderLoopFuture<'a, E> {
                             throttle,
                             frame_profile,
                             terminal_diff_planning,
+                            input_backend,
                             element,
                         } => (
                             fullscreen,
@@ -658,6 +687,7 @@ impl<'a, E: ElementExt + Send + 'a> Future for RenderLoopFuture<'a, E> {
                             throttle,
                             frame_profile,
                             terminal_diff_planning,
+                            input_backend,
                             element,
                         ),
                         _ => unreachable!(),
@@ -690,6 +720,7 @@ impl<'a, E: ElementExt + Send + 'a> Future for RenderLoopFuture<'a, E> {
                         terminal.suspend_on_ctrl_z();
                     }
                     terminal.set_canvas_diff_planning(terminal_diff_planning);
+                    terminal.set_input_backend(input_backend);
                     let fut = Box::pin(terminal_render_loop(
                         element,
                         terminal,

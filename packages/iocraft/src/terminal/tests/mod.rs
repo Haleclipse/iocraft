@@ -1887,6 +1887,70 @@ fn test_terminal_raw_input_mode_guard_cleans_up_on_drop_and_explicit_exit() {
 }
 
 #[test]
+fn test_terminal_input_backend_defaults_to_crossterm() {
+    let (mut terminal, _output) = Terminal::mock(MockTerminalConfig::default());
+    assert_eq!(terminal.input_backend(), TerminalInputBackend::Crossterm);
+    assert_eq!(terminal.raw_input_session_request(), None);
+
+    let _events = terminal.events().unwrap();
+    assert!(
+        terminal.is_raw_mode_enabled(),
+        "default mock event backend should still start the crossterm-style raw mode"
+    );
+    assert_eq!(terminal.raw_input_session_request(), None);
+}
+
+#[test]
+fn test_terminal_input_backend_raw_records_session_request() {
+    let terminal_modes = TerminalRawInputModeOptions {
+        hide_cursor: false,
+        bracketed_paste: true,
+        focus_events: true,
+        mouse_capture: true,
+        keyboard_enhancement_flags: None,
+        xterm_modify_other_keys: true,
+    };
+    let options = TerminalRawInputSessionOptions {
+        terminal_modes,
+        enable_os_raw_mode: false,
+    };
+    let (mut terminal, _output) = Terminal::mock(
+        MockTerminalConfig::default().with_input_backend(TerminalInputBackend::raw_input(options)),
+    );
+
+    let _events = terminal.events().unwrap();
+    assert_eq!(terminal.raw_input_session_request(), Some(options));
+    assert!(
+        !terminal.is_raw_mode_enabled(),
+        "raw-input backend selection only records the takeover request"
+    );
+}
+
+#[test]
+fn test_terminal_input_backend_raw_keeps_os_raw_mode_explicit() {
+    let backend = TerminalInputBackend::raw_input_terminal_modes(TerminalRawInputModeOptions {
+        hide_cursor: true,
+        bracketed_paste: true,
+        focus_events: false,
+        mouse_capture: false,
+        keyboard_enhancement_flags: None,
+        xterm_modify_other_keys: false,
+    });
+    let (mut terminal, _output) =
+        Terminal::mock(MockTerminalConfig::default().with_input_backend(backend));
+
+    let _events = terminal.events().unwrap();
+    let request = terminal
+        .raw_input_session_request()
+        .expect("raw input backend should record a session request");
+    assert!(!request.enable_os_raw_mode);
+    assert!(
+        !terminal.is_raw_mode_enabled(),
+        "OS raw mode stays off unless an explicit raw-input session guard owns it"
+    );
+}
+
+#[test]
 fn test_terminal_raw_input_session_guard_keeps_os_raw_mode_opt_in() {
     let terminal_modes = TerminalRawInputModeOptions {
         hide_cursor: true,
@@ -2539,6 +2603,8 @@ fn test_resize_event_triggers_terminal_mode_reassertion() {
         ignore_ctrl_c: false,
         suspend_on_ctrl_z: false,
         canvas_diff_planning: TerminalDiffPlanning::Baseline,
+        input_backend: TerminalInputBackend::Crossterm,
+        raw_input_session_request: None,
         synchronized_update_depth: 0,
         synchronized_update_started: false,
         synchronized_update_supported: false,
@@ -2585,6 +2651,8 @@ fn test_stdin_gap_reasserts_terminal_modes_like_cc_ink() {
         ignore_ctrl_c: false,
         suspend_on_ctrl_z: false,
         canvas_diff_planning: TerminalDiffPlanning::Baseline,
+        input_backend: TerminalInputBackend::Crossterm,
+        raw_input_session_request: None,
         synchronized_update_depth: 0,
         synchronized_update_started: false,
         synchronized_update_supported: false,
@@ -2630,6 +2698,8 @@ fn test_same_size_resize_event_is_ignored() {
         ignore_ctrl_c: false,
         suspend_on_ctrl_z: false,
         canvas_diff_planning: TerminalDiffPlanning::Baseline,
+        input_backend: TerminalInputBackend::Crossterm,
+        raw_input_session_request: None,
         synchronized_update_depth: 0,
         synchronized_update_started: false,
         synchronized_update_supported: false,
@@ -2755,6 +2825,8 @@ fn test_synchronized_update_wraps_clear_canvas_when_it_writes() {
         ignore_ctrl_c: false,
         suspend_on_ctrl_z: false,
         canvas_diff_planning: TerminalDiffPlanning::Baseline,
+        input_backend: TerminalInputBackend::Crossterm,
+        raw_input_session_request: None,
         synchronized_update_depth: 0,
         synchronized_update_started: false,
         synchronized_update_supported: true,
@@ -2802,6 +2874,8 @@ fn test_synchronized_update_stays_lazy_for_identical_canvas_write() {
         ignore_ctrl_c: false,
         suspend_on_ctrl_z: false,
         canvas_diff_planning: TerminalDiffPlanning::Baseline,
+        input_backend: TerminalInputBackend::Crossterm,
+        raw_input_session_request: None,
         synchronized_update_depth: 0,
         synchronized_update_started: false,
         synchronized_update_supported: true,
@@ -2846,6 +2920,8 @@ fn test_synchronized_update_wraps_current_damage_canvas_write() {
         ignore_ctrl_c: false,
         suspend_on_ctrl_z: false,
         canvas_diff_planning: TerminalDiffPlanning::Baseline,
+        input_backend: TerminalInputBackend::Crossterm,
+        raw_input_session_request: None,
         synchronized_update_depth: 0,
         synchronized_update_started: false,
         synchronized_update_supported: true,
@@ -2901,6 +2977,8 @@ fn test_synchronized_update_wraps_previous_damage_canvas_write() {
         ignore_ctrl_c: false,
         suspend_on_ctrl_z: false,
         canvas_diff_planning: TerminalDiffPlanning::Baseline,
+        input_backend: TerminalInputBackend::Crossterm,
+        raw_input_session_request: None,
         synchronized_update_depth: 0,
         synchronized_update_started: false,
         synchronized_update_supported: true,
@@ -2953,6 +3031,8 @@ fn test_synchronized_update_stays_lazy_for_identical_fullscreen_canvas_write() {
         ignore_ctrl_c: false,
         suspend_on_ctrl_z: false,
         canvas_diff_planning: TerminalDiffPlanning::Baseline,
+        input_backend: TerminalInputBackend::Crossterm,
+        raw_input_session_request: None,
         synchronized_update_depth: 0,
         synchronized_update_started: false,
         synchronized_update_supported: true,
@@ -3026,6 +3106,8 @@ fn test_synchronized_update_wraps_pending_wrap_resolution() {
         ignore_ctrl_c: false,
         suspend_on_ctrl_z: false,
         canvas_diff_planning: TerminalDiffPlanning::Baseline,
+        input_backend: TerminalInputBackend::Crossterm,
+        raw_input_session_request: None,
         synchronized_update_depth: 0,
         synchronized_update_started: false,
         synchronized_update_supported: true,

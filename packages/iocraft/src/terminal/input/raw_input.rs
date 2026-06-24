@@ -224,6 +224,46 @@ impl Default for TerminalRawInputSessionOptions {
     }
 }
 
+/// Input backend selected by a render loop or terminal integration.
+///
+/// The default stays on iocraft's crossterm event backend. [`Self::RawInput`]
+/// is an explicit takeover request for applications that provide their own raw
+/// byte reader and feed parsed events through the raw-input frontend/session
+/// helpers in this module.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerminalInputBackend {
+    /// Use iocraft's built-in crossterm event backend.
+    #[default]
+    Crossterm,
+    /// Record an opt-in caller-owned raw-input session request.
+    RawInput(TerminalRawInputSessionOptions),
+}
+
+impl TerminalInputBackend {
+    /// Selects a caller-owned raw-input backend with explicit session options.
+    pub fn raw_input(options: TerminalRawInputSessionOptions) -> Self {
+        Self::RawInput(options)
+    }
+
+    /// Selects a caller-owned raw-input backend that only manages terminal-side
+    /// modes. OS raw mode remains disabled unless the caller builds a full
+    /// [`TerminalRawInputSessionOptions`] with `enable_os_raw_mode: true`.
+    pub fn raw_input_terminal_modes(terminal_modes: TerminalRawInputModeOptions) -> Self {
+        Self::RawInput(TerminalRawInputSessionOptions {
+            terminal_modes,
+            enable_os_raw_mode: false,
+        })
+    }
+
+    /// Returns the raw-input session request when this backend is opted in.
+    pub fn raw_input_session_options(self) -> Option<TerminalRawInputSessionOptions> {
+        match self {
+            Self::Crossterm => None,
+            Self::RawInput(options) => Some(options),
+        }
+    }
+}
+
 /// RAII owner for an explicit caller-owned raw-input session.
 ///
 /// This combines [`TerminalRawInputModeGuard`]'s terminal-side mode cleanup with
