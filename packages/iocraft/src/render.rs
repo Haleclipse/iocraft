@@ -501,6 +501,15 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
         self.transparent_layout
     }
 
+    /// Returns whether any retained child component signaled an internal change.
+    ///
+    /// Memo-like wrappers can use this to keep ordinary state/focus/input updates
+    /// flowing even when their explicit props comparator says the wrapper inputs
+    /// are unchanged.
+    pub fn children_have_pending_change(&self) -> bool {
+        self.children.has_pending_change()
+    }
+
     /// Updates the children of the current component.
     pub fn update_children<I, T>(&mut self, children: I, context: Option<Context>)
     where

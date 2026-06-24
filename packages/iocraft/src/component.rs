@@ -136,6 +136,7 @@ pub(crate) struct InstantiatedComponent {
     hooks: Vec<Box<dyn AnyHook>>,
     first_update: bool,
     has_transparent_layout: bool,
+    pending_change: bool,
 }
 
 impl InstantiatedComponent {
@@ -148,6 +149,7 @@ impl InstantiatedComponent {
             hooks: Default::default(),
             first_update: true,
             has_transparent_layout: false,
+            pending_change: false,
         }
     }
 
@@ -183,6 +185,7 @@ impl InstantiatedComponent {
         self.hooks.post_component_update(&mut updater);
         self.first_update = false;
         self.has_transparent_layout = updater.has_transparent_layout();
+        self.pending_change = false;
     }
 
     pub fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {
@@ -239,6 +242,7 @@ impl InstantiatedComponent {
         let children_status = Pin::new(&mut self.children).poll_change(cx);
         let hooks_status = Pin::new(&mut self.hooks).poll_change(cx);
         if component_status.is_ready() || children_status.is_ready() || hooks_status.is_ready() {
+            self.pending_change = true;
             Poll::Ready(())
         } else {
             Poll::Pending
@@ -252,6 +256,12 @@ pub(crate) struct Components {
 }
 
 impl Components {
+    pub fn has_pending_change(&self) -> bool {
+        self.components
+            .iter()
+            .any(|component| component.pending_change)
+    }
+
     pub fn draw(&mut self, drawer: &mut ComponentDrawer<'_>) {
         for component in self.components.iter_mut() {
             if component.has_transparent_layout {

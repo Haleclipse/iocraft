@@ -37,6 +37,9 @@ pub use link::*;
 mod mixed_text;
 pub use mixed_text::*;
 
+mod memo;
+pub use memo::*;
+
 mod offscreen_freeze;
 pub use offscreen_freeze::*;
 
