@@ -484,17 +484,22 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
     /// children will effectively be direct descendants of the parent of the current component for
     /// layout purposes.
     pub fn set_transparent_layout(&mut self, transparent_layout: bool) {
-        if transparent_layout && !self.transparent_layout {
-            self.context
+        if transparent_layout {
+            let transparent_style = Style {
+                display: Display::None,
+                ..Default::default()
+            };
+            if self
+                .context
                 .layout_engine
-                .set_style(
-                    self.node_id,
-                    Style {
-                        display: Display::None,
-                        ..Default::default()
-                    },
-                )
-                .expect("we should be able to set the style");
+                .style(self.node_id)
+                .is_ok_and(|current| current != &transparent_style)
+            {
+                self.context
+                    .layout_engine
+                    .set_style(self.node_id, transparent_style)
+                    .expect("we should be able to set the style");
+            }
         }
         self.transparent_layout = transparent_layout;
     }
@@ -523,6 +528,30 @@ impl<'a, 'b, 'c, 'w> ComponentUpdater<'a, 'b, 'c, 'w> {
     /// are unchanged.
     pub fn children_have_pending_change(&self) -> bool {
         self.children.has_pending_change()
+    }
+
+    /// Retains the current child component tree without updating child props.
+    ///
+    /// Memo-like transparent wrappers use this to keep retained child layout
+    /// nodes attached to the parent layout tree when their comparator bails.
+    pub fn retain_children(&mut self) {
+        let mut child_node_ids = Vec::new();
+        for component in self.children.components.iter() {
+            component.append_retained_layout_node_ids(&mut child_node_ids);
+        }
+        if self.transparent_layout {
+            self.unattached_child_node_ids
+                .extend(child_node_ids.iter().copied());
+            self.context
+                .layout_engine
+                .set_children(self.node_id, &[])
+                .expect("we should be able to set the children");
+        } else {
+            self.context
+                .layout_engine
+                .set_children(self.node_id, &child_node_ids)
+                .expect("we should be able to set the children");
+        }
     }
 
     /// Updates the children of the current component.

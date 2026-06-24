@@ -60,6 +60,7 @@ impl Component for Memo {
         _hooks: Hooks,
         updater: &mut ComponentUpdater,
     ) {
+        updater.set_transparent_layout(true);
         let child_changed = updater.children_have_pending_change();
         let memo_equal = self
             .previous_key
@@ -69,6 +70,8 @@ impl Component for Memo {
 
         if !memo_equal || child_changed {
             updater.update_children(props.children.iter_mut(), None);
+        } else {
+            updater.retain_children();
         }
 
         self.previous_key = Some(props.memo_key.clone());
@@ -115,6 +118,28 @@ mod tests {
     #[component]
     fn NoComparatorCountingChild(props: &CountingChildProps) -> impl Into<AnyElement<'static>> {
         counting_child_text(props, &NO_COMPARATOR_CHILD_RENDERS)
+    }
+
+    #[component]
+    fn TransparentMemoLayoutApp() -> impl Into<AnyElement<'static>> {
+        element! {
+            View(flex_direction: FlexDirection::Column) {
+                Text(content: "before")
+                Memo(memo_key: "stable".to_string(), compare: memo_key_eq as MemoComparator) {
+                    Text(content: "line 1")
+                    Text(content: "line 2")
+                }
+                Text(content: "after")
+            }
+        }
+    }
+
+    #[test]
+    fn test_memo_is_layout_transparent_like_react_memo() {
+        assert_eq!(
+            element!(TransparentMemoLayoutApp).to_string(),
+            "before\nline 1\nline 2\nafter\n"
+        );
     }
 
     #[component]

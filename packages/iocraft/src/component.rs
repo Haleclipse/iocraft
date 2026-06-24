@@ -138,6 +138,10 @@ pub(crate) struct InstantiatedComponent {
     has_transparent_layout: bool,
     skip_child_poll: bool,
     pending_change: bool,
+    // Layout nodes exposed through transparent descendants during the last
+    // update. Memo-like wrappers reuse this list when they retain children
+    // without re-entering the skipped subtree.
+    exposed_child_node_ids: Vec<NodeId>,
 }
 
 impl InstantiatedComponent {
@@ -152,11 +156,17 @@ impl InstantiatedComponent {
             has_transparent_layout: false,
             skip_child_poll: false,
             pending_change: false,
+            exposed_child_node_ids: Vec::new(),
         }
     }
 
     pub fn node_id(&self) -> NodeId {
         self.node_id
+    }
+
+    pub(crate) fn append_retained_layout_node_ids(&self, out: &mut Vec<NodeId>) {
+        out.push(self.node_id);
+        out.extend(self.exposed_child_node_ids.iter().copied());
     }
 
     pub fn component(&self) -> &dyn AnyComponent {
@@ -170,6 +180,7 @@ impl InstantiatedComponent {
         component_context_stack: &mut ContextStack<'_>,
         props: AnyProps,
     ) {
+        let exposed_start = unattached_child_node_ids.len();
         let mut updater = ComponentUpdater::new(
             self.node_id,
             &mut self.children,
@@ -188,6 +199,7 @@ impl InstantiatedComponent {
         self.first_update = false;
         self.has_transparent_layout = updater.has_transparent_layout();
         self.skip_child_poll = updater.should_skip_child_poll();
+        self.exposed_child_node_ids = unattached_child_node_ids[exposed_start..].to_vec();
         self.pending_change = false;
     }
 
