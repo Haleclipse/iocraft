@@ -366,6 +366,183 @@ fn test_plan_terminal_inline_canvas_frame_patches_emits_full_reset_fallback() {
 }
 
 #[test]
+fn test_plan_terminal_canvas_diff_single_pass_classifies_repaint_and_stats() {
+    let mut previous = Canvas::new(8, 2);
+    previous
+        .subview_mut(0, 0, 0, 0, 8, 2)
+        .set_text(0, 0, "same", CanvasTextStyle::default());
+    previous.clear_damage();
+
+    let identical = previous.clone();
+    let planning = TerminalDiffPlanning::SinglePass {
+        bounds: DiffBoundsMode::FullCanvas,
+        count_changed_cells: true,
+    };
+    let plan = plan_terminal_canvas_diff(
+        Some(&previous),
+        &identical,
+        planning,
+        TerminalCanvasDiffContext::default(),
+    );
+    assert!(!plan.should_repaint);
+    assert_eq!(plan.reason, None);
+    assert_eq!(plan.rows_scanned, 2);
+    assert_eq!(plan.changed_cells, Some(0));
+    assert_eq!(plan.bounds, None);
+
+    let mut changed = previous.clone();
+    changed
+        .subview_mut(0, 0, 0, 0, 8, 2)
+        .set_text(0, 1, "x", CanvasTextStyle::default());
+    changed.clear_damage();
+    let changed_plan = plan_terminal_canvas_diff(
+        Some(&previous),
+        &changed,
+        planning,
+        TerminalCanvasDiffContext::default(),
+    );
+    assert!(changed_plan.should_repaint);
+    assert_eq!(
+        changed_plan.reason,
+        Some(TerminalCanvasRepaintReason::CanvasChanged)
+    );
+    assert_eq!(changed_plan.rows_scanned, 2);
+    assert_eq!(changed_plan.changed_cells, Some(1));
+
+    let forced = plan_terminal_canvas_diff(
+        Some(&previous),
+        &identical,
+        TerminalDiffPlanning::SinglePass {
+            bounds: DiffBoundsMode::FullCanvas,
+            count_changed_cells: false,
+        },
+        TerminalCanvasDiffContext {
+            terminal_size_changed: true,
+            ..TerminalCanvasDiffContext::default()
+        },
+    );
+    assert!(forced.should_repaint);
+    assert_eq!(
+        forced.reason,
+        Some(TerminalCanvasRepaintReason::TerminalResized)
+    );
+    assert_eq!(forced.rows_scanned, 0);
+    assert_eq!(forced.changed_cells, None);
+}
+
+#[test]
+fn test_plan_terminal_canvas_diff_keeps_optimized_bounds_opt_in_and_safe() {
+    let mut previous = Canvas::new(8, 3);
+    previous
+        .subview_mut(0, 0, 0, 0, 8, 3)
+        .set_text(0, 0, "stable", CanvasTextStyle::default());
+    previous.clear_damage();
+
+    let damage = DamageRegion {
+        x: 2,
+        y: 1,
+        width: 3,
+        height: 1,
+    };
+    let mut damaged = previous.clone();
+    damaged.mark_damage(damage);
+
+    let plan = plan_terminal_canvas_diff(
+        Some(&previous),
+        &damaged,
+        TerminalDiffPlanning::SinglePass {
+            bounds: DiffBoundsMode::DamageRegionWhenSafe,
+            count_changed_cells: true,
+        },
+        TerminalCanvasDiffContext::default(),
+    );
+    assert!(plan.should_repaint);
+    assert_eq!(
+        plan.reason,
+        Some(TerminalCanvasRepaintReason::CurrentDamage)
+    );
+    assert_eq!(plan.changed_cells, Some(0));
+    assert_eq!(plan.bounds, Some(damage));
+    assert_eq!(plan.rows_scanned, 3);
+
+    let mut damaged_and_changed = damaged.clone();
+    damaged_and_changed.subview_mut(0, 0, 0, 0, 8, 3).set_text(
+        0,
+        2,
+        "z",
+        CanvasTextStyle::default(),
+    );
+    let unsafe_bounds = plan_terminal_canvas_diff(
+        Some(&previous),
+        &damaged_and_changed,
+        TerminalDiffPlanning::SinglePass {
+            bounds: DiffBoundsMode::DamageRegionWhenSafe,
+            count_changed_cells: true,
+        },
+        TerminalCanvasDiffContext::default(),
+    );
+    assert!(unsafe_bounds.should_repaint);
+    assert_eq!(
+        unsafe_bounds.reason,
+        Some(TerminalCanvasRepaintReason::CurrentDamage)
+    );
+    assert_eq!(unsafe_bounds.changed_cells, Some(1));
+    assert_eq!(
+        unsafe_bounds.bounds, None,
+        "content changes keep full-canvas safety"
+    );
+}
+
+#[test]
+fn test_plan_terminal_canvas_diff_baseline_and_target_are_explicit() {
+    let previous = Canvas::new(4, 1);
+    let mut next = Canvas::new(4, 1);
+    next.subview_mut(0, 0, 0, 0, 4, 1)
+        .set_text(0, 0, "x", CanvasTextStyle::default());
+    next.clear_damage();
+
+    let baseline = plan_terminal_canvas_diff(
+        Some(&previous),
+        &next,
+        TerminalDiffPlanning::Baseline,
+        TerminalCanvasDiffContext {
+            target: TerminalCanvasDiffTarget::Fullscreen,
+            ..TerminalCanvasDiffContext::default()
+        },
+    );
+    assert!(baseline.should_repaint);
+    assert_eq!(
+        baseline.reason,
+        Some(TerminalCanvasRepaintReason::CanvasChanged)
+    );
+    assert_eq!(baseline.target, TerminalCanvasDiffTarget::Fullscreen);
+    assert_eq!(baseline.rows_scanned, 0);
+    assert_eq!(baseline.changed_cells, None);
+
+    let mut previous_damage = previous.clone();
+    previous_damage.mark_damage(DamageRegion {
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+    });
+    let cleanup = plan_terminal_canvas_diff(
+        Some(&previous_damage),
+        &previous,
+        TerminalDiffPlanning::SinglePass {
+            bounds: DiffBoundsMode::FullCanvas,
+            count_changed_cells: false,
+        },
+        TerminalCanvasDiffContext::default(),
+    );
+    assert_eq!(
+        cleanup.reason,
+        Some(TerminalCanvasRepaintReason::PreviousDamage)
+    );
+    assert_eq!(cleanup.rows_scanned, 0);
+}
+
+#[test]
 fn test_optimize_terminal_patches_matches_cc_ink_optimizer_rules() {
     let optimized = optimize_terminal_patches(vec![
         TerminalPatch::Stdout(String::new()),

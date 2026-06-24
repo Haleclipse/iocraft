@@ -1,4 +1,5 @@
 use super::{fullscreen::packed_canvas_row_ansi_from_col, *};
+use crate::canvas::DamageRegion;
 
 /// Reason a CC Ink-style terminal diff should fall back to a full clear.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -324,6 +325,281 @@ impl TerminalInlineCanvasFramePatchPlan {
     /// Returns whether the caller may continue with its sparse row diff path.
     pub fn sparse_diff_safe(&self) -> bool {
         self.decision.clear_reason.is_none()
+    }
+}
+
+/// Opt-in retained-canvas diff planning mode.
+///
+/// The default is [`Self::Baseline`], which preserves iocraft's current render
+/// loop behavior. [`Self::SinglePass`] is a benchmark-facing planning mode for
+/// callers that want one retained-canvas scan to classify repaint work before
+/// deciding whether to promote the strategy into a renderer or terminal backend.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerminalDiffPlanning {
+    /// Preserve the existing baseline path.
+    #[default]
+    Baseline,
+    /// Build a single retained-canvas diff plan without changing the default writer.
+    SinglePass {
+        /// Bounds policy for the plan. The planner only reports damage bounds
+        /// when they are proven safe; otherwise it falls back to full-canvas
+        /// scan semantics even when this field requests damage bounds.
+        bounds: DiffBoundsMode,
+        /// Count changed cells while planning so frame-profile/benchmark output
+        /// can be compared against the baseline changed-cell scan.
+        count_changed_cells: bool,
+    },
+}
+
+/// Bounds policy for opt-in terminal diff planning.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiffBoundsMode {
+    /// Keep full-canvas scan semantics.
+    #[default]
+    FullCanvas,
+    /// Use the union of previous/current damage only when a full scan proves the
+    /// logical canvas is otherwise unchanged.
+    DamageRegionWhenSafe,
+}
+
+/// Render target for an opt-in retained-canvas diff plan.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TerminalCanvasDiffTarget {
+    /// Native main-screen scrollback path.
+    #[default]
+    MainScreen,
+    /// Fullscreen/alternate-screen path. Fullscreen-only optimizations such as
+    /// DECSTBM must still be gated by their own terminal capability/config.
+    Fullscreen,
+}
+
+/// External frame conditions that can force terminal repaint before content diffing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TerminalCanvasDiffContext {
+    /// Application code cleared terminal output during update.
+    pub terminal_cleared: bool,
+    /// Dynamic alternate-screen state changed and invalidated the previous buffer.
+    pub alternate_screen_changed: bool,
+    /// Terminal viewport size changed.
+    pub terminal_size_changed: bool,
+    /// Which renderer mode this plan is for.
+    pub target: TerminalCanvasDiffTarget,
+}
+
+/// Reason an opt-in retained-canvas plan needs terminal repaint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalCanvasRepaintReason {
+    /// No previous frame existed, so the terminal needs an initial paint.
+    FirstFrame,
+    /// Application code cleared terminal output during update.
+    TerminalCleared,
+    /// Dynamic alternate-screen state changed and invalidated the previous buffer.
+    AlternateScreenChanged,
+    /// The terminal size changed.
+    TerminalResized,
+    /// The current canvas requested a full repaint.
+    ForceFullRepaint,
+    /// The current canvas carries explicit damage metadata.
+    CurrentDamage,
+    /// The previous retained canvas carried damage metadata that must be cleaned up.
+    PreviousDamage,
+    /// The logical retained canvas changed.
+    CanvasChanged,
+}
+
+/// Opt-in single-pass retained-canvas diff plan.
+///
+/// This is intentionally a planning artifact only: it performs no terminal I/O,
+/// does not enter fullscreen, and does not replace the default writer. Keeping it
+/// explicit lets benchmark harnesses compare baseline vs optimized modes and lets
+/// bug reports bisect back to the current safe path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalCanvasDiffPlan {
+    /// Requested planning mode.
+    pub planning: TerminalDiffPlanning,
+    /// Render target this plan was produced for.
+    pub target: TerminalCanvasDiffTarget,
+    /// Whether terminal output should be written.
+    pub should_repaint: bool,
+    /// Why repaint is needed, if any.
+    pub reason: Option<TerminalCanvasRepaintReason>,
+    /// Optional safe diff bounds. `None` means full-canvas scan/write semantics.
+    pub bounds: Option<DamageRegion>,
+    /// Number of retained-canvas rows scanned by the planner.
+    pub rows_scanned: usize,
+    /// Optional changed-cell count collected during planning.
+    pub changed_cells: Option<usize>,
+}
+
+/// Plans retained-canvas repaint work without changing default renderer behavior.
+///
+/// [`TerminalDiffPlanning::Baseline`] mirrors the existing repaint guards and
+/// leaves detailed scan work to the current render loop/writer. The opt-in
+/// [`TerminalDiffPlanning::SinglePass`] mode scans retained canvases once to
+/// classify logical changes and, when requested, collect a changed-cell count.
+/// Damage-bounded output remains conservative: the planner only returns damage
+/// bounds when the counted logical diff is empty, so callers cannot accidentally
+/// miss content changes outside a damage region.
+pub fn plan_terminal_canvas_diff(
+    previous: Option<&Canvas>,
+    next: &Canvas,
+    planning: TerminalDiffPlanning,
+    context: TerminalCanvasDiffContext,
+) -> TerminalCanvasDiffPlan {
+    if matches!(planning, TerminalDiffPlanning::Baseline) {
+        let reason = baseline_repaint_reason(previous, next, context);
+        return TerminalCanvasDiffPlan {
+            planning,
+            target: context.target,
+            should_repaint: reason.is_some(),
+            reason,
+            bounds: None,
+            rows_scanned: 0,
+            changed_cells: None,
+        };
+    }
+
+    let TerminalDiffPlanning::SinglePass {
+        bounds,
+        count_changed_cells,
+    } = planning
+    else {
+        unreachable!("baseline returned above")
+    };
+
+    let forced_reason = forced_repaint_reason(previous, next, context);
+    let must_scan_for_canvas_change = forced_reason.is_none();
+    let must_scan_for_damage_bounds = bounds == DiffBoundsMode::DamageRegionWhenSafe
+        && damage_region_union(
+            previous.and_then(Canvas::damage_region),
+            next.damage_region(),
+        )
+        .is_some();
+    let should_scan =
+        must_scan_for_canvas_change || count_changed_cells || must_scan_for_damage_bounds;
+
+    let scan = should_scan.then(|| scan_terminal_canvas_diff(previous, next, count_changed_cells));
+    let logical_changed = scan.as_ref().is_some_and(|scan| scan.logical_changed);
+    let reason = forced_reason
+        .or_else(|| logical_changed.then_some(TerminalCanvasRepaintReason::CanvasChanged));
+    let changed_cells =
+        count_changed_cells.then(|| scan.as_ref().map_or(0, |scan| scan.changed_cells));
+    let damage_bounds =
+        if bounds == DiffBoundsMode::DamageRegionWhenSafe && changed_cells == Some(0) {
+            damage_region_union(
+                previous.and_then(Canvas::damage_region),
+                next.damage_region(),
+            )
+        } else {
+            None
+        };
+
+    TerminalCanvasDiffPlan {
+        planning,
+        target: context.target,
+        should_repaint: reason.is_some(),
+        reason,
+        bounds: damage_bounds,
+        rows_scanned: scan.map_or(0, |scan| scan.rows_scanned),
+        changed_cells,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TerminalCanvasDiffScan {
+    logical_changed: bool,
+    changed_cells: usize,
+    rows_scanned: usize,
+}
+
+fn baseline_repaint_reason(
+    previous: Option<&Canvas>,
+    next: &Canvas,
+    context: TerminalCanvasDiffContext,
+) -> Option<TerminalCanvasRepaintReason> {
+    forced_repaint_reason(previous, next, context)
+        .or_else(|| (previous != Some(next)).then_some(TerminalCanvasRepaintReason::CanvasChanged))
+}
+
+fn forced_repaint_reason(
+    previous: Option<&Canvas>,
+    next: &Canvas,
+    context: TerminalCanvasDiffContext,
+) -> Option<TerminalCanvasRepaintReason> {
+    if context.terminal_cleared {
+        Some(TerminalCanvasRepaintReason::TerminalCleared)
+    } else if context.alternate_screen_changed {
+        Some(TerminalCanvasRepaintReason::AlternateScreenChanged)
+    } else if context.terminal_size_changed {
+        Some(TerminalCanvasRepaintReason::TerminalResized)
+    } else if next.should_force_full_repaint() {
+        Some(TerminalCanvasRepaintReason::ForceFullRepaint)
+    } else if next.has_damage() {
+        Some(TerminalCanvasRepaintReason::CurrentDamage)
+    } else if previous.is_some_and(Canvas::has_damage) {
+        Some(TerminalCanvasRepaintReason::PreviousDamage)
+    } else if previous.is_none() {
+        Some(TerminalCanvasRepaintReason::FirstFrame)
+    } else {
+        None
+    }
+}
+
+fn scan_terminal_canvas_diff(
+    previous: Option<&Canvas>,
+    next: &Canvas,
+    count_changed_cells: bool,
+) -> TerminalCanvasDiffScan {
+    let empty;
+    let previous = match previous {
+        Some(previous) => previous,
+        None => {
+            empty = Canvas::new(0, 0);
+            &empty
+        }
+    };
+    let rows_scanned = previous.height().max(next.height());
+
+    if count_changed_cells {
+        let mut changed_cells = 0;
+        previous.diff_each(next, |_| {
+            changed_cells += 1;
+            false
+        });
+        TerminalCanvasDiffScan {
+            logical_changed: changed_cells > 0,
+            changed_cells,
+            rows_scanned,
+        }
+    } else {
+        let logical_changed =
+            (0..rows_scanned).any(|y| previous.row_change_start(next, y).is_some());
+        TerminalCanvasDiffScan {
+            logical_changed,
+            changed_cells: 0,
+            rows_scanned,
+        }
+    }
+}
+
+fn damage_region_union(a: Option<DamageRegion>, b: Option<DamageRegion>) -> Option<DamageRegion> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(DamageRegion {
+            x: a.x.min(b.x),
+            y: a.y.min(b.y),
+            width: a
+                .x
+                .saturating_add(a.width)
+                .max(b.x.saturating_add(b.width))
+                .saturating_sub(a.x.min(b.x)),
+            height: a
+                .y
+                .saturating_add(a.height)
+                .max(b.y.saturating_add(b.height))
+                .saturating_sub(a.y.min(b.y)),
+        }),
+        (Some(region), None) | (None, Some(region)) => Some(region),
+        (None, None) => None,
     }
 }
 
