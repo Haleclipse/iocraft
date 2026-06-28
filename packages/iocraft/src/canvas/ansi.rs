@@ -15,6 +15,7 @@ impl Canvas {
         let mut text_style = CanvasTextStyle::default();
         let mut active_hyperlink: Option<String> = None;
         let mut col = start_col.min(row.len());
+        let mut rendered_width = col;
         while col < row.len() {
             let cell_start_col = col;
             let cell = &row[col];
@@ -157,6 +158,7 @@ impl Canvas {
                 1
             };
             col += cell_display_width;
+            rendered_width = rendered_width.max(col);
 
             if ansi && effective_bg != background_color {
                 sgr_bg(&mut w, effective_bg.unwrap_or(Color::Reset))?;
@@ -208,26 +210,34 @@ impl Canvas {
                 w.write_all(b" ")?;
             }
         }
-        // Row-end: single exit path for erase-to-EOL. Reset only the
-        // attributes that would bleed into the erased area, then clear.
+        // Row-end: close hyperlinks, reset active SGR state, and clear only
+        // when the row did not reach the canvas width. Do not emit EL after a
+        // write that reached the right margin: on VT terminals the cursor is
+        // in pending-wrap state at the last column, and `CSI K` can clear that
+        // just-written last cell. There is no stale tail to clear when the
+        // retained row already reaches the canvas width.
         if ansi {
             if active_hyperlink.is_some() {
                 hyperlink_close(&mut w)?;
             }
-            if background_color.is_some()
+            let needs_reset = background_color.is_some()
+                || text_style.color.is_some()
                 || text_style.underline
                 || text_style.underline_color.is_some()
+                || text_style.italic
                 || text_style.blink
                 || text_style.hidden
                 || text_style.strikethrough
                 || text_style.overline
                 || text_style.invert
-                || text_style.weight != Weight::Normal
-            {
+                || text_style.weight != Weight::Normal;
+            if needs_reset {
                 sgr_reset(&mut w)?;
             }
-            erase_to_eol(&mut w)?;
-            sgr_reset(&mut w)?;
+            if rendered_width < self.width {
+                erase_to_eol(&mut w)?;
+                sgr_reset(&mut w)?;
+            }
         }
         Ok(())
     }

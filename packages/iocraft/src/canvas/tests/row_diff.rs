@@ -15,6 +15,65 @@ fn test_subview_get_text_relative_coords() {
 }
 
 #[test]
+fn full_width_ansi_row_does_not_erase_last_cell() {
+    let mut canvas = Canvas::new(5, 1);
+    canvas
+        .subview_mut(0, 0, 0, 0, 5, 1)
+        .set_text(0, 0, "─────", CanvasTextStyle::default());
+
+    let mut out = Vec::new();
+    canvas.write_ansi_row_without_newline(0, &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+
+    assert_eq!(out, "─────");
+}
+
+#[test]
+fn partial_width_ansi_row_still_erases_stale_tail() {
+    let mut canvas = Canvas::new(5, 1);
+    canvas
+        .subview_mut(0, 0, 0, 0, 5, 1)
+        .set_text(0, 0, "abc", CanvasTextStyle::default());
+
+    let mut out = Vec::new();
+    canvas.write_ansi_row_without_newline(0, &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+
+    assert!(
+        out.contains("\x1b[K"),
+        "partial rows must clear to EOL: {out:?}"
+    );
+}
+
+#[test]
+fn full_width_styled_ansi_row_resets_without_erasing_last_cell() {
+    let mut canvas = Canvas::new(3, 1);
+    canvas.subview_mut(0, 0, 0, 0, 3, 1).set_text(
+        0,
+        0,
+        "abc",
+        CanvasTextStyle {
+            color: Some(Color::Red),
+            italic: true,
+            ..Default::default()
+        },
+    );
+
+    let mut out = Vec::new();
+    canvas.write_ansi_row_without_newline(0, &mut out).unwrap();
+    let out = String::from_utf8(out).unwrap();
+
+    assert!(
+        !out.contains("\x1b[K"),
+        "full-width styled rows must not erase the right-margin cell: {out:?}"
+    );
+    assert!(
+        out.ends_with(csi!("0m")),
+        "full-width styled rows must still reset SGR state: {out:?}"
+    );
+}
+
+#[test]
 fn test_row_eq_same_content() {
     let mut a = Canvas::new(10, 2);
     let mut b = Canvas::new(10, 2);

@@ -160,14 +160,11 @@ fn test_canvas_full_background_color() {
 
     let mut expected = Vec::new();
 
-    // line 1: character is written before the erase, so all 6 cells
-    // are emitted with the background, then reset + CSI K clears any
-    // leftover content past the last column.
+    // line 1: all 6 cells are emitted with the background. The row is
+    // already full width, so no EL is needed at the right margin.
     write!(expected, csi!("0m")).unwrap();
     write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
     write!(expected, "      ").unwrap();
-    write!(expected, csi!("0m")).unwrap();
-    write!(expected, csi!("K")).unwrap();
     write!(expected, csi!("0m")).unwrap();
     write!(expected, "\r\n").unwrap();
 
@@ -175,15 +172,11 @@ fn test_canvas_full_background_color() {
     write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
     write!(expected, "      ").unwrap();
     write!(expected, csi!("0m")).unwrap();
-    write!(expected, csi!("K")).unwrap();
-    write!(expected, csi!("0m")).unwrap();
     write!(expected, "\r\n").unwrap();
 
     // line 3
     write!(expected, csi!("{}m"), Colored::BackgroundColor(Color::Red)).unwrap();
     write!(expected, "      ").unwrap();
-    write!(expected, csi!("0m")).unwrap();
-    write!(expected, csi!("K")).unwrap();
     write!(expected, csi!("0m")).unwrap();
     write!(expected, "\r\n").unwrap();
 
@@ -653,7 +646,7 @@ fn test_write_ansi_without_final_newline() {
 }
 
 #[test]
-fn test_ansi_erase_for_full_rows() {
+fn test_ansi_omits_erase_for_full_rows() {
     let mut canvas = Canvas::new(10, 1);
 
     canvas
@@ -666,8 +659,6 @@ fn test_ansi_erase_for_full_rows() {
     let mut expected = Vec::new();
     write!(expected, csi!("0m")).unwrap();
     write!(expected, "1234512345").unwrap();
-    write!(expected, csi!("K")).unwrap();
-    write!(expected, csi!("0m")).unwrap();
     write!(expected, "\r\n").unwrap();
 
     assert_eq!(actual, expected);
