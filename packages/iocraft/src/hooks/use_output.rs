@@ -261,6 +261,10 @@ impl UseOutputState {
         }
 
         if has_visible_output {
+            // Flush stdout and stderr so the terminal processes all written
+            // bytes before we append the trailing newline.
+            let _ = terminal.stdout().flush();
+            let _ = terminal.stderr().flush();
             if output_col > 0 {
                 self.appended_newline = match terminal_width {
                     Some(width) if output_col as usize >= width => None,

@@ -1,15 +1,15 @@
 use crate::{
     component,
-    components::{TextDrawer, TextWrap, View},
+    components::{TextDecoration, TextDrawer, TextWrap, View},
     element,
     hooks::{Ref, State, UseMemo, UseState, UseTerminalEvents},
     segmented_string::SegmentedString,
     AnyElement, CanvasTextStyle, Color, Component, ComponentDrawer, ComponentUpdater, HandlerMut,
     Hook, Hooks, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, LayoutStyle, Overflow, Position,
-    Props, Size, StyleOverlay, TerminalEvent,
+    Props, Size, StyleOverlay, TerminalEvent, Weight,
 };
 use std::sync::Arc;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 trait UseCursorOverlay {
     fn use_cursor_overlay(&mut self) -> &mut CursorOverlayState;
@@ -119,6 +119,18 @@ impl TextInputHandle {
 pub struct TextInputProps {
     /// The color to make the text.
     pub color: Option<Color>,
+
+    /// The weight (boldness) of the text.
+    pub weight: Weight,
+
+    /// The text decoration.
+    pub decoration: TextDecoration,
+
+    /// Whether the text is italicized.
+    pub italic: bool,
+
+    /// Whether the foreground and background colors are inverted.
+    pub invert: bool,
 
     /// The current value.
     pub value: String,
@@ -294,6 +306,10 @@ impl TextBuffer {
 #[derive(Default, Props)]
 struct TextBufferViewProps {
     color: Option<Color>,
+    weight: Weight,
+    underline: bool,
+    italic: bool,
+    invert: bool,
     buffer: Arc<TextBuffer>,
 }
 
@@ -318,6 +334,10 @@ impl Component for TextBufferView {
     ) {
         self.text_style = CanvasTextStyle {
             color: props.color,
+            weight: props.weight,
+            underline: props.underline,
+            italic: props.italic,
+            invert: props.invert,
             ..Default::default()
         };
         self.buffer = props.buffer.clone();
@@ -467,6 +487,13 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
             scroll_offset_col.set(cursor_col - width + 1);
         } else if cursor_col < scroll_offset_col.get() {
             scroll_offset_col.set(cursor_col as _);
+        }
+
+        // Scroll back when the content shrinks so it isn't cut off.
+        let content_width = props.value.width() as u16;
+        let max_scroll_offset_col = (content_width + 1).saturating_sub(width);
+        if scroll_offset_col.get() > max_scroll_offset_col {
+            scroll_offset_col.set(max_scroll_offset_col);
         }
     }
 
@@ -662,6 +689,10 @@ pub fn TextInput(mut hooks: Hooks, props: &mut TextInputProps) -> impl Into<AnyE
                 TextBufferView(
                     buffer,
                     color: props.color,
+                    weight: props.weight,
+                    underline: props.decoration == TextDecoration::Underline,
+                    italic: props.italic,
+                    invert: props.invert,
                 )
             }
         }
