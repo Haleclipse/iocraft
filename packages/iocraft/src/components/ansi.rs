@@ -18,6 +18,9 @@ pub struct AnsiProps {
     /// Default text color inherited by ANSI spans without an explicit SGR color.
     pub color: Option<Color>,
 
+    /// Force inverse styling for all parsed text, matching a parent Ink `Text`.
+    pub invert: bool,
+
     /// The text wrapping behavior.
     pub wrap: TextWrap,
 
@@ -52,7 +55,7 @@ pub fn Ansi(props: &AnsiProps) -> impl Into<AnyElement<'static>> {
             content.italic = run.style.italic;
             content.strikethrough = run.style.strikethrough;
             content.overline = run.style.overline;
-            content.invert = run.style.invert;
+            content.invert = props.invert || run.style.invert;
             content.href = run.hyperlink;
             content
         })
@@ -106,6 +109,17 @@ mod tests {
             canvas.resolved_text_style(9, 0).unwrap().color,
             Some(Color::Blue)
         );
+    }
+
+    #[test]
+    fn test_ansi_component_forced_inverse_applies_to_all_runs() {
+        let canvas = element!(Ansi(
+            invert: true,
+            content: "plain \x1b[31mred\x1b[0m".to_string(),
+        ))
+        .render(None);
+        assert!(canvas.resolved_text_style(0, 0).unwrap().invert);
+        assert!(canvas.resolved_text_style(6, 0).unwrap().invert);
     }
 
     #[test]
