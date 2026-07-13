@@ -604,6 +604,22 @@ impl<'a> Terminal<'a> {
         self.inner.reinitialize_after_resume()
     }
 
+    /// Releases raw/input modes so another process (or direct writes) can own
+    /// the terminal. Dropping the event stream releases crossterm's input
+    /// reader while the terminal is handed off; it is recreated by
+    /// [`Terminal::reacquire_terminal`].
+    pub fn release_terminal(&mut self) -> io::Result<()> {
+        self.event_stream = None;
+        self.inner.release_terminal_modes()
+    }
+
+    /// Restores terminal modes and the input event stream after
+    /// [`Terminal::release_terminal`].
+    pub fn reacquire_terminal(&mut self) -> io::Result<()> {
+        self.inner.reacquire_terminal_modes()?;
+        self.start_event_stream()
+    }
+
     /// Returns a mutable reference to the stdout handle.
     pub fn stdout(&mut self) -> &mut dyn Write {
         let _ = self.ensure_synchronized_update_started();

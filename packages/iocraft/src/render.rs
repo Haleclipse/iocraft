@@ -1581,6 +1581,19 @@ impl<'a> Tree<'a> {
                 let _ = crate::ansi::terminal_title(term.render_output(), title);
                 let _ = term.render_output().flush();
             }
+            if let Some(request) = self.system_context.take_terminal_handoff() {
+                // Terminal ownership handoff: release modes, run the job, then
+                // reacquire and force a full repaint. The job itself decides
+                // whether to spawn a process, print, prompt, etc.
+                let release = term.release_terminal();
+                if let Some(job) = request.take_job() {
+                    job(release);
+                }
+                term.reacquire_terminal()?;
+                prev_canvas = None;
+                prev_terminal_size = None;
+                continue;
+            }
             if self.system_context.should_exit() || term.received_ctrl_c() {
                 break;
             }

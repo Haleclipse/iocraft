@@ -63,6 +63,20 @@ pub(super) trait TerminalImpl: Write + Send {
         Ok(())
     }
 
+    /// Physically restores cooked mode and releases input side modes so another
+    /// process (or direct writes) can safely own the terminal, while keeping
+    /// bookkeeping intact so [`TerminalImpl::reacquire_terminal_modes`] can
+    /// reassert exactly the modes that were active.
+    fn release_terminal_modes(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    /// Reasserts the terminal modes that were active before
+    /// [`TerminalImpl::release_terminal_modes`].
+    fn reacquire_terminal_modes(&mut self) -> io::Result<()> {
+        self.reinitialize_after_resume()
+    }
+
     /// Positions the physical terminal cursor. When `visible` is true (ratatui model),
     /// the cursor is shown; when false (ink model), it is positioned for IME only.
     /// Called after each canvas write.
@@ -500,26 +514,11 @@ impl TerminalImpl for StdTerminal<'_> {
                 return Ok(());
             }
 
-            // Match CC Ink's Ctrl+Z handoff: leave the terminal in cooked mode,
-            // show the cursor, and disable input side modes so the shell prompt
-            // does not receive bracketed-paste/focus/mouse/extended-key noise
-            // while this process is stopped. Keep our bookkeeping intact so the
-            // SIGCONT repair path can reassert the modes that were active.
-            self.restore_cursor_baseline()?;
-            if self.raw_mode_enabled {
-                terminal::disable_raw_mode()?;
-                self.dest.execute(event::DisableBracketedPaste)?;
-                self.dest.execute(event::DisableFocusChange)?;
-                if self.mouse_capture {
-                    self.dest.execute(event::DisableMouseCapture)?;
-                }
-                if self.enabled_keyboard_enhancement {
-                    self.dest.execute(event::PopKeyboardEnhancementFlags)?;
-                }
-            }
-            self.dest.queue(cursor::Show)?;
-            self.dest.flush()?;
-
+            // Match CC Ink's Ctrl+Z handoff: leave the terminal in cooked mode
+            // so the shell prompt does not receive bracketed-paste/focus/mouse/
+            // extended-key noise while this process is stopped. The SIGCONT
+            // repair path reasserts the modes that were active.
+            self.release_terminal_modes()?;
             signal_hook::low_level::raise(signal_hook::consts::signal::SIGSTOP)
                 .map_err(io::Error::other)?;
             if let Some(signal) = &self.resume_signal {
@@ -527,6 +526,29 @@ impl TerminalImpl for StdTerminal<'_> {
             }
         }
         Ok(())
+    }
+
+    fn release_terminal_modes(&mut self) -> io::Result<()> {
+        if !self.input_is_terminal {
+            return Ok(());
+        }
+
+        // Keep bookkeeping intact while physically restoring cooked mode; the
+        // matching reacquire call reasserts exactly the modes that were active.
+        self.restore_cursor_baseline()?;
+        if self.raw_mode_enabled {
+            terminal::disable_raw_mode()?;
+            self.dest.execute(event::DisableBracketedPaste)?;
+            self.dest.execute(event::DisableFocusChange)?;
+            if self.mouse_capture {
+                self.dest.execute(event::DisableMouseCapture)?;
+            }
+            if self.enabled_keyboard_enhancement {
+                self.dest.execute(event::PopKeyboardEnhancementFlags)?;
+            }
+        }
+        self.dest.queue(cursor::Show)?;
+        self.dest.flush()
     }
 
     fn is_raw_mode_supported(&self) -> bool {

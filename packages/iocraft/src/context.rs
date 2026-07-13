@@ -3,6 +3,35 @@ use core::{
     cell::{Ref, RefCell, RefMut},
     mem,
 };
+use std::sync::{Arc, Mutex};
+
+/// A deferred job to run while the render loop has released the terminal.
+///
+/// The job receives the result of releasing the terminal modes: `Ok(())` means
+/// the terminal is in cooked mode and the closure may safely hand it to a child
+/// process or write to it directly; `Err` means the release failed and the
+/// closure should not touch the terminal (implementations forward the error to
+/// their caller instead of running the user closure).
+pub(crate) type TerminalHandoffJob = Box<dyn FnOnce(std::io::Result<()>) + Send>;
+
+/// Request registered by [`AppHandle::suspend_terminal`](crate::hooks::AppHandle::suspend_terminal),
+/// consumed by the render loop once per frame.
+#[derive(Clone)]
+pub(crate) struct TerminalHandoffRequest {
+    job: Arc<Mutex<Option<TerminalHandoffJob>>>,
+}
+
+impl TerminalHandoffRequest {
+    pub(crate) fn new(job: TerminalHandoffJob) -> Self {
+        Self {
+            job: Arc::new(Mutex::new(Some(job))),
+        }
+    }
+
+    pub(crate) fn take_job(&self) -> Option<TerminalHandoffJob> {
+        self.job.lock().ok().and_then(|mut job| job.take())
+    }
+}
 
 /// Per-frame alternate-screen request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +49,7 @@ pub struct SystemContext {
     keyboard_enhancement_flags: Option<crate::KeyboardEnhancementFlags>,
     terminal_title: Option<String>,
     alternate_screen: Option<AlternateScreenRequest>,
+    terminal_handoff: Option<TerminalHandoffRequest>,
 }
 
 impl SystemContext {
@@ -30,7 +60,16 @@ impl SystemContext {
             keyboard_enhancement_flags: None,
             terminal_title: None,
             alternate_screen: None,
+            terminal_handoff: None,
         }
+    }
+
+    pub(crate) fn request_terminal_handoff(&mut self, request: TerminalHandoffRequest) {
+        self.terminal_handoff = Some(request);
+    }
+
+    pub(crate) fn take_terminal_handoff(&mut self) -> Option<TerminalHandoffRequest> {
+        self.terminal_handoff.take()
     }
 
     /// If called from a component that is being dynamically rendered, this will cause the render
